@@ -1,6 +1,8 @@
 # Cypher32
 
-A portable hacking game for the **Heltec Wireless Paper V1.2** (ESP32-S3 + SX1262 LoRa + e-ink display). Devices discover each other over LoRa, run recon, attempt hacks, and earn XP to level up — all controlled through a phone-friendly web portal over Wi-Fi.
+Cypher32 is a **real-world competitive hacking game** you play on physical hardware at events, hackathons, or with friends. Each player carries a **Heltec Wireless Paper V1.2** — a credit-card-sized board with an e-ink display, ESP32-S3 processor, and long-range LoRa radio. Devices automatically find each other over LoRa without any internet or phone connection, then players run recon, attempt hacks, and earn XP to level up their character.
+
+There are no apps to install and no accounts to create. You flash the firmware once, power on the device, pick your faction, and you're in the game. The device's e-ink screen shows your character at all times. Everything else is controlled through a phone-friendly web portal served directly from the device over Wi-Fi.
 
 ---
 
@@ -16,19 +18,92 @@ A portable hacking game for the **Heltec Wireless Paper V1.2** (ESP32-S3 + SX126
 
 ---
 
-## Quick start
+## First-time setup
 
-1. Flash `cypher32_v52.ino` to your Wireless Paper (see [Build](#build)).
-2. Connect to the **Cypher32** open Wi-Fi network the device broadcasts.
-3. Open **192.168.4.1** in a browser.
-4. Pick a faction and set a password — the device reboots as your hacker persona.
-5. The display shows your character and status at all times.
+### Step 1 — Flash the firmware
 
-> **Factory reset:** hold the PRG button for 5 seconds to wipe all progress and reboot to setup.
+**Arduino IDE:**
+1. Install the **Heltec ESP32** board package via Boards Manager.
+2. Install these libraries via Library Manager:
+   - **RadioLib** (version 7.1 or later)
+   - **heltec-eink-modules**
+3. Open `cypher32_v52.ino`. All source files (`cypher32_packets.h`, `cypher32_lora.h`) must be in the same folder.
+4. Select board: **Heltec Wireless Paper**.
+5. Click **Upload**.
+
+**PlatformIO:**
+```
+pio run -t upload
+```
+Dependencies are declared in `platformio.ini` and downloaded automatically.
+
+---
+
+### Step 2 — Power on
+
+Connect a LiPo battery or plug in USB. The e-ink display will show the Cypher32 boot screen and then the **setup screen**, which means the device is ready for first-time configuration.
+
+The device now broadcasts an open Wi-Fi network called **`Cypher32`** with no password.
+
+---
+
+### Step 3 — Connect your phone
+
+On your phone or laptop, open Wi-Fi settings and join the **`Cypher32`** network. No password required.
+
+Once connected, open a browser and go to:
+
+```
+192.168.4.1
+```
+
+You will see the Cypher32 web portal.
+
+---
+
+### Step 4 — Choose your faction and set a password
+
+The setup page asks for two things:
+
+1. **Faction** — this sets your starting bonus and combat style (see [Factions](#factions) below). Choose carefully; it can only be changed with a factory reset.
+2. **Password** — this secures your device's web portal after setup. Pick something you'll remember.
+
+Press **Save & Reboot**.
+
+---
+
+### Step 5 — After reboot
+
+The device reboots, generates your **hacker name** (derived from the chip ID — same device always gets the same name), and starts the game. The e-ink display now shows:
+
+- Your hacker name, faction, and level
+- Your character sprite (mood changes with wins and losses)
+- A speech bubble with idle quips or status messages
+- XP bar and skill bars along the bottom
+
+The Wi-Fi network is now renamed to `C32_<Faction>_<Name>` and the portal requires your password. Your device has also started transmitting LoRa beacons every 30 seconds so other players can discover you.
+
+> **Factory reset:** hold the **PRG** button for 5 seconds at any time to wipe all progress and return to the setup screen.
+
+---
+
+## Using the web portal
+
+Connect to your device's Wi-Fi and open **192.168.4.1**.
+
+| Tab | What you can do |
+|-----|-----------------|
+| **HUD** | View level, XP, skills, battery %, LoRa diagnostics, send a manual beacon |
+| **Nodes** | See all discovered players, run recon, attempt hacks |
+| **Skills** | Spend skill points earned from levelling up |
+| **Messages** | Send and receive short LoRa messages (max 32 chars) |
+| **Settings** | Change your portal password, view LoRa info, factory reset |
 
 ---
 
 ## Factions
+
+Choose your faction during first-time setup. Each faction starts with a skill bonus and has a unique combat perk and risk.
 
 | Faction | Starting bonus | Combat perk | Risk |
 |---------|---------------|-------------|------|
@@ -41,7 +116,7 @@ A portable hacking game for the **Heltec Wireless Paper V1.2** (ESP32-S3 + SX126
 
 ## Skills
 
-Earn one **Skill Point (SP)** per level-up. Spend it in the web portal under **Skills**.
+Earn one **Skill Point (SP)** per level-up. Spend it in the **Skills** tab of the web portal.
 
 | Skill | Effect |
 |-------|--------|
@@ -59,6 +134,24 @@ Maximum skill value: **35** (3 from faction start + 32 from level-ups).
 - **XP to next level:** `currentLevel × 150`  (150 XP at LVL 1 → 4 650 XP at LVL 31)
 - **XP per successful hack:** `15 + enemyFirewall × 5`  (up to ~55 XP)
 - XP cannot go below 0; excess XP at LVL 32 is discarded.
+
+---
+
+## How hacking works
+
+1. Wait for other players' devices to appear in the **Nodes** tab. Nodes are discovered automatically when their LoRa beacon is received.
+2. Run up to **3 recon attempts** on a target to reveal their stats (Brute / Stealth / Firewall). Each recon request is sent over LoRa and the target device replies automatically — no action needed on their end.
+3. When ready, press **Hack (1 attempt)**. One roll is made and the result appears on both devices' e-ink displays.
+4. A successful hack locks the target for **7 days** — they cannot be hacked again until the cooldown expires.
+5. A failed hack triggers a **12-hour retry cooldown** on that node for you.
+
+**Hit chance formula:**
+```
+base 60 %
++ 5 % per recon completed (max +15 %)
++ 2 % per point of (your Brute Force − their Firewall)
+clamped between 25 % and 90 %
+```
 
 ---
 
@@ -81,32 +174,6 @@ All packet types are defined in `cypher32_packets.h`.
 
 ---
 
-## Web portal
-
-Connect to the device's Wi-Fi and open **192.168.4.1**.
-
-| Tab | What you can do |
-|-----|-----------------|
-| **HUD** | View level, XP, skills, battery, LoRa diagnostics, send beacon |
-| **Nodes** | See discovered nodes, run recon, attempt hacks |
-| **Skills** | Spend skill points |
-| **Messages** | Send and receive LoRa messages |
-| **Settings** | Change password, LoRa info, factory reset |
-
----
-
-## Hacking
-
-1. Wait for nodes to appear in the **Nodes** tab (discovered via LoRa beacons).
-2. Run up to **3 recon attempts** to reveal Brute / Stealth / Firewall stats.
-3. Press **Hack (1 attempt)** — one roll, result shown on the e-ink display.
-4. A successful hack locks the target for **7 days**.
-5. A failed hack triggers a **12-hour retry cooldown** on that node.
-
-**Hit chance:** base 60 % + 5 % per recon completed + 2 % per point of `(skillBrute − enemyFirewall)`, clamped 25 %–90 %.
-
----
-
 ## Display
 
 The 250 × 122 e-ink screen updates only on game events (hack result, incoming message, level-up, mood drift every 10 min). This keeps refresh-lag imperceptible during normal use.
@@ -115,22 +182,6 @@ The 250 × 122 e-ink screen updates only on game events (hack result, incoming m
 - **Character sprite:** reacts to mood (idle / focused / victory / defeat)
 - **Speech bubble:** idle quips, scan status, hack results
 - **Footer:** XP bar, skill bars (B / S / F)
-
----
-
-## Build
-
-### Arduino IDE
-1. Install **Heltec ESP32** board package.
-2. Install libraries: **RadioLib** (≥ 7.1), **heltec-eink-modules**.
-3. Open `cypher32_v52.ino` — all source files must be in the same folder.
-4. Select board **Heltec Wireless Paper**, upload.
-
-### PlatformIO
-```
-pio run -t upload
-```
-Dependencies are declared in `platformio.ini`.
 
 ---
 
