@@ -196,8 +196,18 @@ All traffic runs at **868 MHz — SF7 — BW 125 kHz — CR 4/5 — sync 0x12**.
 | `HACK_REPLY` | unicast | Defender returns Firewall and faction |
 | `HACK_RESULT` | unicast | Outcome and XP delta sent to defender |
 | `MSG` | unicast | Raw text, 32 chars |
+| `ACK` | unicast | Link-layer acknowledgement |
+| `PING` | unicast | Reliable no-op — round-trip probe |
 
 Defined in `cypher32_packets.h`.
+
+Every unicast carries a sequence number and is acknowledged. Unacknowledged
+frames are retried up to four times before the portal reports `NO RESPONSE` —
+an action never just silently disappears. Duplicates are suppressed, replies are
+deferred so they don't collide with the requester re-arming its receiver, and the
+radio listens before transmitting.
+
+Diagnostics live at `192.168.4.1/api/diag`.
 
 ---
 
@@ -220,8 +230,10 @@ The character notices when you're losing.
 |------|---------|
 | `cypher32_v52.ino` | Main sketch — game logic, web portal, display |
 | `cypher32_packets.h` | Packet types, structs, `KnownNode`, name generator |
-| `cypher32_lora.h` | Header-only LoRa driver (RadioLib SX1262 wrapper) |
+| `cypher32_lora.h` | Header-only LoRa stack — link layer, retries, diagnostics |
 | `platformio.ini` | PlatformIO build config |
+| `ROADMAP.md` | Development plan and current status |
+| `test/` | Host-side link-layer tests (`cd test && make`) |
 
 ---
 

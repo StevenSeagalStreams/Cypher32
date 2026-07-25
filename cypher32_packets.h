@@ -2,20 +2,26 @@
 #include <Arduino.h>
 
 // ─────────────────────────────────────────────
-//  CYPHER32 LORA PACKET PROTOCOL
+//  CYPHER32 LORA PACKET PROTOCOL  — v54
 // ─────────────────────────────────────────────
 //
-//  Packets use XOR scramble (LORA_ENCRYPT=1) or plain (LORA_ENCRYPT=0).
-//  All devices must use the same setting. No GPS, no RSSI-position, no names.
-//  Only chip-IDs are transmitted.
+//  v54 adds a link layer on top of the raw driver:
+//    - per-sender sequence numbers (duplicate suppression)
+//    - flags byte carrying ACK_REQUESTED / IS_ACK
 //
-//  Packet layout (before encryption):
+//  No GPS, no RSSI-position, no names on the wire.
+//  Only chip-IDs and game stats are transmitted.
+//
+//  Packet layout:
 //    [1]  type     — packet type byte
+//    [1]  seq      — rolling per-sender counter (ACKs echo the acked seq)
+//    [1]  flags    — see PKTFLAG_* below
 //    [4]  from_id  — sender chip-ID (uint32)
 //    [4]  to_id    — recipient chip-ID (uint32, 0=broadcast)
 //    [N]  payload  — type-specific data
 //
-//  Max payload after AES padding: 48 bytes total packet.
+//  Header is 11 bytes. Largest packet (PktMsg) is 44 bytes, well under the
+//  64-byte cap enforced by loraSend().
 
 // ── Packet type bytes ────────────────────────
 #define PKT_BEACON      0x01  // broadcast: "I exist"
@@ -23,9 +29,14 @@
 #define PKT_RECON_REPLY 0x03  // reply with one stat (type + value)
 #define PKT_HACK_REQ    0x04  // initiate hack — sends attacker brute
 #define PKT_HACK_REPLY  0x05  // defender replies with firewall level
-#define PKT_HACK_RESULT 0x06  // attacker broadcasts outcome
+#define PKT_HACK_RESULT 0x06  // attacker tells defender the outcome
 #define PKT_MSG         0x07  // text message (max 32 chars)
-#define PKT_ACK         0x08  // generic acknowledgement
+#define PKT_ACK         0x08  // link-layer acknowledgement
+#define PKT_PING        0x09  // reliable no-op — round-trip test
+
+// ── Header flags ─────────────────────────────
+#define PKTFLAG_ACK_REQ 0x01  // sender wants an ACK for this seq
+#define PKTFLAG_IS_ACK  0x02  // this frame *is* an ACK; seq = acked seq
 
 // ── Recon stat types ─────────────────────────
 #define STAT_BRUTE    0x01
@@ -36,8 +47,8 @@
 #define HACK_WIN  0x01
 #define HACK_LOSE 0x00
 
-// ── Shared network key (AES-128, 16 bytes) ───
-//  Change this to your own secret before deploying.
+// ── Shared network key (reserved for T4.1 HMAC signing) ───
+//  Not yet used. Change this to your own secret before deploying.
 //  All devices must use the same key.
 static const uint8_t LORA_KEY[16] = {
   0xC3, 0x29, 0xF1, 0x7A, 0x04, 0xBE, 0x58, 0x3D,
@@ -65,6 +76,8 @@ static const uint8_t LORA_KEY[16] = {
 
 struct PktHeader {
   uint8_t  type;
+  uint8_t  seq;         // rolling per-sender counter
+  uint8_t  flags;       // PKTFLAG_*
   uint32_t from_id;
   uint32_t to_id;       // 0x00000000 = broadcast
 };
@@ -108,8 +121,12 @@ struct PktMsg {
 };
 
 struct PktAck {
-  PktHeader hdr;        // type=PKT_ACK
-  uint8_t   ack_type;   // which packet type we're acking
+  PktHeader hdr;        // type=PKT_ACK, flags|=PKTFLAG_IS_ACK, seq=acked seq
+  uint8_t   ack_type;   // which packet type we're acking (diagnostics only)
+};
+
+struct PktPing {
+  PktHeader hdr;        // type=PKT_PING — payload-free reliable probe
 };
 
 #pragma pack(pop)

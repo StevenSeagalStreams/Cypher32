@@ -230,6 +230,10 @@ String hackedList = "";
 #define WEEK_MS      604800000UL
 #define HALF_DAY_MS   43200000UL   // 12 hours hack retry cooldown
 
+// Set by any handler that put a transient screen up; loop() returns the
+// display to idle when it expires. Avoids blocking delay() in handlers.
+unsigned long revertIdleAtMs = 0;
+
 int myLevel       = 1;
 int myXP          = 0;
 int skillPoints   = 0;
@@ -1601,6 +1605,31 @@ void handleBeacon() {
   server.sendHeader("Location", "/#hud"); server.send(303);
 }
 
+// T0.3 — machine-readable diagnostics.  curl 192.168.4.1/api/diag
+void handleApiDiag() {
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  server.send(200, "application/json", loraDiagJson());
+}
+
+// T3.7 groundwork — reliable no-op probe against one node.
+void handleApiPing() {
+  if (!server.hasArg("id")) { server.send(400, "application/json", "{\"error\":\"id required\"}"); return; }
+  uint32_t target = (uint32_t)strtoul(server.arg("id").c_str(), nullptr, 16);
+  unsigned long t0 = millis();
+  loraSendPing(target);
+  // Pump until ACK or the reliable layer gives up (4 tries ≈ 2.8 s worst case).
+  while (loraActionPending() && (uint32_t)(millis() - t0) < 3500) {
+    loraTick(); delay(5); yield();
+  }
+  bool ok = (loraActionState == LA_SUCCESS);
+  String j = "{\"ok\":" + String(ok ? "true" : "false") +
+             ",\"rttMs\":" + String((uint32_t)(millis() - t0)) +
+             ",\"tries\":" + String(loraActionTries) +
+             ",\"rssi\":"  + String(loraLastRSSI) + "}";
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  server.send(200, "application/json", j);
+}
+
 // Clear all known nodes from RAM (no flash wipe — they repopulate from beacons)
 void handleClearNodes() {
   knownCount = 0;
@@ -1629,11 +1658,16 @@ void handleRecon() {
   if (n && n->recon_count < 3 && loraReady) {
     int prevCount = n->recon_count;
     loraSendRecon(target);
-    // Wait up to 5s for reply — ISR-driven so loraTick() reliably catches it
+
+    // Bounded pump, not a blocking wait. With deferred replies (60–120 ms) and
+    // the ACK layer, a round trip lands in ~250 ms; 1.5 s covers the first
+    // retry too. The old code waited 5 s with no retry underneath it, so it
+    // usually just timed out slowly.
+    // Goes away entirely at T3.2/T3.5 when the portal polls /api/state.
     unsigned long t0 = millis();
-    while (millis() - t0 < 5000 && n->recon_count == prevCount) {
+    while ((uint32_t)(millis() - t0) < 1500 && n->recon_count == prevCount) {
       loraTick();
-      delay(10);
+      delay(5);
       yield();
     }
   }
@@ -1695,6 +1729,11 @@ void handleHack() {
   n->hack_time_ms   = millis();
   bool lvlUp = false;
 
+  // Tell the defender. Until v54 this packet was never transmitted by anyone —
+  // loraSendHackResult() existed but had no callers, so the target of a hack
+  // had no idea it had happened. Reliable send: retried and ACKed.
+  if (loraReady) loraSendHackResult(target, won, (int8_t)constrain(result.xpDelta, -128, 127));
+
   if (won) {
     recordHack(nid);
     displayHackSuccess(nid, result.xpDelta, result.note);
@@ -1704,11 +1743,13 @@ void handleHack() {
     applyXP(result.xpDelta);
   }
 
-  if (lvlUp) { delay(4000); displayLevelUp(); delay(5000); }
-  else        delay(4000);
-
   saveProgress();
-  displayIdle();
+
+  // Non-blocking hold. The old delay(4000)/delay(5000) pair kept the radio
+  // deaf for up to nine seconds right after a hack — exactly when the
+  // defender's ACK and any retry were in flight.
+  if (lvlUp) { displayLevelUp(); revertIdleAtMs = millis() + 6000; }
+  else                            revertIdleAtMs = millis() + 4000;
 
   server.sendHeader("Location", "/#nodes"); server.send(303);
 }
@@ -1796,6 +1837,13 @@ void setup() {
 
   checkFactoryReset();
   loadProgress();
+
+  // Seed the PRNG before the radio comes up. Beacon jitter, CAD backoff and
+  // retry jitter all draw from it — if every board booted with the same seed
+  // they would back off in lockstep, which is the collision problem (D2) all
+  // over again. Chip ID differs per device, so the sequences diverge.
+  randomSeed(myChipID32 ^ micros());
+
   loraSetup();
 
   WiFi.mode(WIFI_AP_STA);
@@ -1811,9 +1859,11 @@ void setup() {
   server.on("/setpw",    handleSetPw);
   server.on("/beacon",   handleBeacon);
   server.on("/clearnodes",handleClearNodes);
+  server.on("/api/diag", handleApiDiag);
+  server.on("/api/ping", handleApiPing);
   server.begin();
 
-  // Send first beacon
+  // First beacon immediately; loop() follows up at ~3 s and ~8 s (T1.7)
   if (myName != "") loraSendBeacon();
 
   if (myName == "" || myFaction == "NONE") displaySetup();
@@ -1831,20 +1881,63 @@ void loop() {
 
   if (myName == "" || myFaction == "NONE") return;
 
+  // Deferred return-to-idle. Replaces the old delay(5000), which held the
+  // radio deaf for five seconds every time a message arrived.
+  if (revertIdleAtMs && (int32_t)(millis() - revertIdleAtMs) >= 0) {
+    revertIdleAtMs = 0;
+    displayIdle();
+  }
+
   // Show incoming message — only update display when something arrived
   if (pendingMsg.length() > 0) {
     String msg  = pendingMsg;
     String from = pendingMsgFrom;
     pendingMsg = ""; pendingMsgFrom = "";
     displayIncomingMsg(from, msg);
-    delay(5000);
-    displayIdle();
+    revertIdleAtMs = millis() + 5000;
   }
 
-  // Beacon every 30s — NO display call, keeps loop fast
-  static unsigned long lastBeacon = 0;
-  if (millis() - lastBeacon > 30000UL) {
-    lastBeacon = millis();
+  // Someone hacked US. Before v54 the defender was never told — HACK_RESULT
+  // existed in the protocol but nothing ever transmitted it.
+  if (pendingHackAlert) {
+    pendingHackAlert = false;
+    String who = pendingHackFrom;
+    if (pendingHackAttackerWon) {
+      shiftMood(-1);
+      displayHackFailed(who, 0, "Breached by " + nodeNameFromId(
+                          (uint32_t)strtoul(who.c_str(), nullptr, 16)));
+    } else {
+      shiftMood(+1);
+      displayHackSuccess(who, 0, "Firewall held.");
+    }
+    revertIdleAtMs = millis() + 5000;
+  }
+
+  // Beacon on a jittered 25–35 s interval (T1.7 — fixes D2).
+  // A fixed cadence let two devices lock into phase and collide on every
+  // single beacon, permanently. Boot burst below makes joining fast.
+  static unsigned long lastBeacon  = 0;
+  static unsigned long beaconEvery = 0;
+  static uint8_t       bootBurst   = 0;
+  static unsigned long bootBurstAt = 0;
+
+  if (bootBurst < 2) {
+    // Extra beacons at ~3 s and ~8 s after boot so a device joining a group
+    // is discovered in seconds rather than up to half a minute.
+    if (bootBurstAt == 0) bootBurstAt = millis() + 3000;
+    if ((int32_t)(millis() - bootBurstAt) >= 0) {
+      loraSendBeacon();
+      bootBurst++;
+      bootBurstAt = millis() + 5000;
+      lastBeacon  = millis();
+    }
+  }
+
+  if (beaconEvery == 0)
+    beaconEvery = random(LORA_BEACON_MIN_MS, LORA_BEACON_MAX_MS);
+  if ((uint32_t)(millis() - lastBeacon) > beaconEvery) {
+    lastBeacon  = millis();
+    beaconEvery = random(LORA_BEACON_MIN_MS, LORA_BEACON_MAX_MS);
     loraSendBeacon();
   }
 
