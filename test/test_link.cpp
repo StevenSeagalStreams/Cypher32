@@ -41,6 +41,8 @@ void resetAll() {
   loraActionState = LA_IDLE; loraActionTries = 0;
   pendingHackAlert = false; pendingMsg = "";
   loraNodesEvicted = 0; loraDutyDeferred = 0;
+  loraBadSig = 0; loraReplaysDropped = 0;
+  hackInFlight = false; hackVerdictReady = false; hackTimedOut = false;
   memset(dutyBucketMs, 0, sizeof(dutyBucketMs));
   dutyBucketIdx = 0; dutyBucketStart = 0;
   loraBeaconEnabled = false; loraNextBeaconMs = 0;
@@ -50,10 +52,30 @@ void resetAll() {
   radio.startRxCalls = 0; radio.beginCalls = 0;
 }
 
-// Hand a frame to the radio as if it had just been received.
+// Hand a frame to the radio as if a real peer had just transmitted it —
+// including the T4.1 signature, which the RX path now requires.
 void deliver(const void* pkt, int len) {
-  const uint8_t* p = (const uint8_t*)pkt;
-  radio.rxBuf.assign(p, p + len);
+  uint8_t frame[64];
+  memcpy(frame, pkt, len);
+  int total = len;
+#if LORA_SIGN
+  uint8_t tag[32];
+  hmacSha256(LORA_KEY, sizeof(LORA_KEY), frame, (size_t)len, tag);
+  memcpy(frame + len, tag, SIG_LEN);
+  total = len + SIG_LEN;
+#endif
+  radio.rxBuf.assign(frame, frame + total);
+  radioState  = RS_RX;
+  loraDioFlag = true;
+  loraTick();
+}
+
+// Deliver a frame with a deliberately invalid signature.
+void deliverForged(const void* pkt, int len) {
+  uint8_t frame[64];
+  memcpy(frame, pkt, len);
+  memset(frame + len, 0xAB, SIG_LEN);          // junk tag
+  radio.rxBuf.assign(frame, frame + len + SIG_LEN);
   radioState  = RS_RX;
   loraDioFlag = true;
   loraTick();
@@ -279,7 +301,7 @@ int main() {
     CHECK(h->to_id == 0,                        "beacon is broadcast");
     CHECK(!(h->flags & PKTFLAG_ACK_REQ),        "beacon does not request an ACK");
     CHECK(!pendingUser.active,                    "beacon does not occupy the reliable slot");
-    CHECK(radio.sent[0].data.size() == sizeof(PktBeacon), "beacon size matches struct");
+    CHECK(radio.sent[0].data.size() == sizeof(PktBeacon) + SIG_LEN, "beacon carries struct + signature");
   }
   {
     resetAll();
@@ -288,15 +310,16 @@ int main() {
     CHECK(pendingUser.type == PKT_HACK_RESULT, "correct type in flight");
   }
   {
-    // The defender must actually learn they were hit.
+    // The defender learns it was hit when the REQUEST arrives, not when the
+    // attacker deigns to report a result (T4.3).
     resetAll();
-    PktHackResult hr;
-    mkHdr(&hr.hdr, PKT_HACK_RESULT, 3, PKTFLAG_ACK_REQ, PEER, myChipID32);
-    hr.outcome = HACK_WIN; hr.xp_delta = 30;
-    deliver(&hr, sizeof(hr));
-    CHECK(pendingHackAlert,          "defender is notified of an inbound hack");
-    CHECK(pendingHackAttackerWon,    "outcome decoded correctly");
-    CHECK(txqCountOfType(PKT_ACK) == 1, "HACK_RESULT is ACKed");
+    PktHackReq hq;
+    mkHdr(&hq.hdr, PKT_HACK_REQ, 3, PKTFLAG_ACK_REQ, PEER, myChipID32);
+    hq.brute = 12; hq.recon_count = 2;
+    deliver(&hq, sizeof(hq));
+    CHECK(pendingHackAlert,             "defender is notified of an inbound hack");
+    CHECK(txqCountOfType(PKT_HACK_REPLY) == 1, "defender returns a verdict");
+    CHECK(txqCountOfType(PKT_ACK) == 1, "HACK_REQ is ACKed");
   }
   {
     resetAll();
@@ -465,6 +488,148 @@ int main() {
     loraSendRecon(PEER);
     run(300);
     CHECK(sentCountOfType(PKT_RECON_REQ) == 1, "player's action still goes out");
+  }
+
+  // ── Phase 4 ──
+  printf("T4.1 packet signing\n");
+  {
+    resetAll();
+    PktBeacon b; mkHdr(&b.hdr, PKT_BEACON, 1, 0, PEER, 0);
+    b.level = 5; b.faction = 'B';
+    deliverForged(&b, sizeof(b));
+    CHECK(loraBadSig == 1, "forged frame rejected");
+    CHECK(knownCount == 0, "forged frame never reaches the game logic");
+
+    deliver(&b, sizeof(b));
+    CHECK(knownCount == 1, "correctly signed frame is accepted");
+    CHECK(loraBadSig == 1, "and does not raise the counter");
+  }
+  {
+    // The specific exploit: a third party handing itself a win.
+    resetAll();
+    PktHackResult hr;
+    mkHdr(&hr.hdr, PKT_HACK_RESULT, 9, PKTFLAG_ACK_REQ, 0xDEADBEEF, myChipID32);
+    hr.outcome = HACK_WIN; hr.xp_delta = 120;
+    deliverForged(&hr, sizeof(hr));
+    CHECK(loraBadSig == 1,  "unsigned HACK_RESULT injection rejected");
+    CHECK(knownCount == 0,  "attacker never enters the node table");
+  }
+  {
+    resetAll();
+    loraSendBeacon(); run(30);
+    CHECK(radio.sent.size() == 1, "beacon sent");
+    // A single flipped byte anywhere must invalidate the tag.
+    auto f = radio.sent[0].data;
+    CHECK(f.size() == sizeof(PktBeacon) + SIG_LEN, "tag appended on transmit");
+    f[5] ^= 0x01;
+    uint8_t tag[32];
+    hmacSha256(LORA_KEY, sizeof(LORA_KEY), f.data(), f.size() - SIG_LEN, tag);
+    CHECK(memcmp(tag, f.data() + f.size() - SIG_LEN, SIG_LEN) != 0,
+          "tampering with the payload breaks the tag");
+  }
+
+  printf("T4.2 replay protection\n");
+  {
+    resetAll();
+    PktHackResult hr;
+    mkHdr(&hr.hdr, PKT_HACK_RESULT, 10, PKTFLAG_ACK_REQ, PEER, myChipID32);
+    hr.outcome = HACK_WIN; hr.xp_delta = 40;
+    deliver(&hr, sizeof(hr));
+    KnownNode* n = findNode(PEER);
+    CHECK(n && n->have_result_seq && n->last_result_seq == 10, "result seq recorded");
+
+    // Same seq replayed after the dup ring has rolled past it.
+    memset(seenRing, 0, sizeof(seenRing)); seenIdx = 0;
+    deliver(&hr, sizeof(hr));
+    CHECK(loraReplaysDropped == 1, "replayed HACK_RESULT rejected");
+
+    // An older seq is equally invalid.
+    memset(seenRing, 0, sizeof(seenRing)); seenIdx = 0;
+    mkHdr(&hr.hdr, PKT_HACK_RESULT, 4, PKTFLAG_ACK_REQ, PEER, myChipID32);
+    deliver(&hr, sizeof(hr));
+    CHECK(loraReplaysDropped == 2, "stale seq rejected");
+
+    // A genuinely newer one still works, including across the byte wrap.
+    memset(seenRing, 0, sizeof(seenRing)); seenIdx = 0;
+    mkHdr(&hr.hdr, PKT_HACK_RESULT, 11, PKTFLAG_ACK_REQ, PEER, myChipID32);
+    deliver(&hr, sizeof(hr));
+    CHECK(loraReplaysDropped == 2, "newer seq accepted");
+    n = findNode(PEER);
+    CHECK(n && n->last_result_seq == 11, "high-water mark advanced");
+  }
+  {
+    resetAll();
+    PktHackResult hr;
+    mkHdr(&hr.hdr, PKT_HACK_RESULT, 250, PKTFLAG_ACK_REQ, PEER, myChipID32);
+    hr.outcome = HACK_WIN; hr.xp_delta = 40;
+    deliver(&hr, sizeof(hr));
+    memset(seenRing, 0, sizeof(seenRing)); seenIdx = 0;
+    mkHdr(&hr.hdr, PKT_HACK_RESULT, 3, PKTFLAG_ACK_REQ, PEER, myChipID32);  // wrapped
+    deliver(&hr, sizeof(hr));
+    CHECK(loraReplaysDropped == 0, "seq wraparound is not mistaken for a replay");
+  }
+
+  printf("T4.3 defender-authoritative hack\n");
+  {
+    // Odds must be identical on both sides, and bounded.
+    CHECK(loraHackChancePct(10, 0, 10) == 60, "base 60%");
+    CHECK(loraHackChancePct(10, 3, 10) == 75, "+5% per recon");
+    CHECK(loraHackChancePct(15, 0, 10) == 70, "+2% per point of brute over firewall");
+    CHECK(loraHackChancePct(0, 0, 35)  == 25, "floor 25%");
+    CHECK(loraHackChancePct(35, 3, 0)  == 90, "ceiling 90%");
+  }
+  {
+    // Defender rolls and reports; attacker consumes the verdict.
+    resetAll();
+    loraHackStart(PEER, 2);
+    CHECK(hackInFlight,                     "hack marked in flight");
+    CHECK(pendingUser.type == PKT_HACK_REQ, "HACK_REQ sent reliably");
+    run(30);
+    PktHeader* h = (PktHeader*)radio.sent[0].data.data();
+    PktHackReq* sentReq = (PktHackReq*)radio.sent[0].data.data();
+    CHECK(h->type == PKT_HACK_REQ,        "HACK_REQ on the wire");
+    CHECK(sentReq->brute == skillBrute,   "carries attacker brute");
+    CHECK(sentReq->recon_count == 2,      "carries attacker recon count");
+
+    PktHackReply rep;
+    mkHdr(&rep.hdr, PKT_HACK_REPLY, 77, PKTFLAG_ACK_REQ, PEER, myChipID32);
+    rep.outcome = HACK_WIN; rep.firewall = 6; rep.faction = 'W';
+    deliver(&rep, sizeof(rep));
+    CHECK(!hackInFlight,                  "hack no longer in flight");
+    CHECK(hackVerdictReady,               "verdict ready for the sketch");
+    CHECK(hackVerdictWon,                 "defender's WIN verdict applied");
+    CHECK(hackVerdictFirewall == 6,       "defender firewall learned");
+    CHECK(hackVerdictFaction == 'W',      "defender faction learned");
+  }
+  {
+    resetAll();
+    loraHackStart(PEER, 0);
+    PktHackReply rep;
+    mkHdr(&rep.hdr, PKT_HACK_REPLY, 78, PKTFLAG_ACK_REQ, PEER, myChipID32);
+    rep.outcome = HACK_LOSE; rep.firewall = 20; rep.faction = 'B';
+    deliver(&rep, sizeof(rep));
+    CHECK(hackVerdictReady && !hackVerdictWon, "defender's LOSE verdict applied");
+  }
+  {
+    // Target out of range: must not leave the sketch waiting forever.
+    resetAll();
+    loraHackStart(PEER, 1);
+    run(6000);
+    CHECK(!hackInFlight,     "hack cleared on timeout");
+    CHECK(hackTimedOut,      "timeout surfaced to the sketch");
+    CHECK(!hackVerdictReady, "no verdict invented locally");
+    CHECK(loraActionState == LA_TIMEOUT, "portal shows NO RESPONSE");
+  }
+  {
+    // A reply from someone we are not attacking must be ignored.
+    resetAll();
+    loraHackStart(PEER, 1);
+    PktHackReply rep;
+    mkHdr(&rep.hdr, PKT_HACK_REPLY, 5, PKTFLAG_ACK_REQ, 0xCCCC3333, myChipID32);
+    rep.outcome = HACK_WIN; rep.firewall = 1; rep.faction = 'G';
+    deliver(&rep, sizeof(rep));
+    CHECK(hackInFlight,       "unrelated HACK_REPLY does not resolve our hack");
+    CHECK(!hackVerdictReady,  "and grants no verdict");
   }
 
   printf("\n%d checks, %d failures\n", checks, failures);

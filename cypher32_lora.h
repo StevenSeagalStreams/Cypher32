@@ -2,6 +2,7 @@
 #include <math.h>
 #include <RadioLib.h>
 #include "cypher32_packets.h"
+#include "cypher32_crypto.h"
 
 // ─────────────────────────────────────────────
 //  CYPHER32 LORA — v54
@@ -62,6 +63,12 @@
 #define DUTY_LIMIT_PCT       0.8f
 #define NODE_PRUNE_MS        10000UL     // how often to age out nodes (T2.3)
 
+// Packet signing (T4.1). A 4-byte truncated HMAC-SHA256 tag is appended to
+// every frame. Set to 0 only for interop debugging — devices with different
+// settings cannot talk to each other.
+#define LORA_SIGN            1
+#define SIG_LEN              4
+
 SPIClass loraSPI(FSPI);
 // The Module constructor only stores pin numbers — no SPI access happens until
 // radio.begin() inside loraSetup(), so file-scope construction is safe.
@@ -105,6 +112,8 @@ int       loraWatchdogFires   = 0;   // T1.6
 int       loraReinits         = 0;
 int       loraNodesEvicted    = 0;   // T2.3
 int       loraDutyDeferred    = 0;   // T2.5
+int       loraBadSig          = 0;   // T4.1
+int       loraReplaysDropped  = 0;   // T4.2
 
 // Beacon scheduling lives here rather than in the sketch's loop() so the
 // adaptive logic (T2.4) sits next to the radio it governs.
@@ -121,6 +130,18 @@ String    pendingMsgFrom = "";
 bool      pendingHackAlert       = false;
 String    pendingHackFrom        = "";
 bool      pendingHackAttackerWon = false;
+
+// ── Outbound hack, defender-authoritative (T4.3) ──
+// The attacker asks; the DEFENDER rolls and returns the verdict. A modified
+// attacker can still lie about its own brute stat, but it cannot simply
+// declare itself the winner, which was the actual exploit.
+bool      hackInFlight        = false;
+uint32_t  hackTargetId        = 0;
+bool      hackVerdictReady    = false;   // a verdict arrived, sketch to apply it
+bool      hackVerdictWon      = false;
+uint8_t   hackVerdictFirewall = 0;
+char      hackVerdictFaction  = '?';
+bool      hackTimedOut        = false;   // target never answered
 
 extern uint32_t myChipID32;
 extern String   myFaction;
@@ -325,11 +346,20 @@ uint8_t txSeq = 0;   // rolling per-sender counter
 // urgent: anything a player is waiting on, plus ACKs and replies. Beacons are
 // not urgent — they are the one thing worth delaying to stay inside the budget.
 bool enqueueTx(const void* pkt, int len, uint32_t delayMs = 0, bool urgent = true) {
-  if (len <= 0 || len > 64) return false;
+  if (len <= 0 || len > (int)(64 - SIG_LEN)) return false;
   for (int i = 0; i < TXQ_SIZE; i++) {
     if (txq[i].active) continue;
     memcpy(txq[i].buf, pkt, len);
-    txq[i].len         = (uint8_t)len;
+    int total = len;
+#if LORA_SIGN
+    // Append the truncated tag over the whole packet (T4.1). Signing happens
+    // here rather than at transmit time so retries re-sign identically.
+    uint8_t tag[32];
+    hmacSha256(LORA_KEY, sizeof(LORA_KEY), txq[i].buf, (size_t)len, tag);
+    memcpy(txq[i].buf + len, tag, SIG_LEN);
+    total = len + SIG_LEN;
+#endif
+    txq[i].len         = (uint8_t)total;
     txq[i].sendAfterMs = millis() + delayMs;
     txq[i].cadTries    = 0;
     txq[i].active      = true;
@@ -416,6 +446,11 @@ static void clearSlot(PendingTx& slot, bool success) {
   if (!slot.active) return;
   slot.active = false;
   if (&slot == &pendingUser) loraActionState = success ? LA_SUCCESS : LA_TIMEOUT;
+  // A hack whose target never answered must not leave the sketch waiting.
+  if (!success && slot.type == PKT_HACK_REQ && hackInFlight) {
+    hackInFlight = false;
+    hackTimedOut = true;
+  }
   if (!success) {
     loraTimeouts++;
     LORA_LOG("TIMEOUT %s seq=%u — no ACK after %d tries",
@@ -459,10 +494,25 @@ void loraSendMsg(uint32_t target_id, const char* text) {
   loraSendReliable(&pkt, sizeof(pkt), "MESSAGE");
 }
 
-void loraSendHackReq(uint32_t target_id) {
+// One implementation of the odds, used by both sides so the defender's roll
+// matches what the attacker's UI predicted.
+int loraHackChancePct(int attackerBrute, int attackerRecon, int defenderFirewall) {
+  int pct = 60 + attackerRecon * 5 + (attackerBrute - defenderFirewall) * 2;
+  if (pct < 25) pct = 25;
+  if (pct > 90) pct = 90;
+  return pct;
+}
+
+// Begin a hack. The verdict arrives later in PKT_HACK_REPLY (T4.3).
+void loraHackStart(uint32_t target_id, int reconCount) {
   PktHackReq pkt;
   fillHdr(&pkt.hdr, PKT_HACK_REQ, target_id);
-  pkt.brute = (uint8_t)skillBrute;
+  pkt.brute       = (uint8_t)skillBrute;
+  pkt.recon_count = (uint8_t)reconCount;
+  hackInFlight     = true;
+  hackTargetId     = target_id;
+  hackVerdictReady = false;
+  hackTimedOut     = false;
   loraSendReliable(&pkt, sizeof(pkt), "HACK");
 }
 
@@ -509,6 +559,24 @@ static void sendAck(uint32_t to_id, uint8_t seq, uint8_t ackedType) {
   ack.ack_type  = ackedType;
   enqueueTx(&ack, sizeof(ack), REPLY_DELAY_MIN_MS);
   loraAcksSent++;
+}
+
+// Verify and strip the 4-byte tag (T4.1). Returns false for a forged or
+// truncated frame; on success *lenInOut drops to the real packet length.
+bool loraVerifyFrame(const uint8_t* buf, int* lenInOut) {
+#if LORA_SIGN
+  int len = *lenInOut;
+  if (len <= (int)SIG_LEN) { loraBadSig++; return false; }
+  uint8_t tag[32];
+  hmacSha256(LORA_KEY, sizeof(LORA_KEY), buf, (size_t)(len - SIG_LEN), tag);
+  if (memcmp(tag, buf + len - SIG_LEN, SIG_LEN) != 0) {
+    loraBadSig++;
+    LORA_LOG("BAD SIGNATURE — frame rejected (len=%d)", len);
+    return false;
+  }
+  *lenInOut = len - SIG_LEN;
+#endif
+  return true;
 }
 
 // ─────────────────────────────────────────────
@@ -597,12 +665,29 @@ void loraHandlePacket(uint8_t* buf, int len) {
     }
     case PKT_HACK_REQ: {
       if (len < (int)sizeof(PktHackReq)) return;
+      PktHackReq* p = (PktHackReq*)buf;
+
+      // T4.3 — the defender rolls. The attacker only supplies its own stats.
+      int  pct          = loraHackChancePct(p->brute, p->recon_count, skillFirewall);
+      bool attackerWins = (random(0, 100) < pct);
+
       PktHackReply reply;
       fillHdr(&reply.hdr, PKT_HACK_REPLY, hdr->from_id);
+      reply.outcome  = attackerWins ? HACK_WIN : HACK_LOSE;
       reply.firewall = (uint8_t)skillFirewall;
       reply.faction  = myFaction.length() > 0 ? myFaction.charAt(0) : '?';
       deferReply(&reply, sizeof(reply));
       touchNode(hdr->from_id);
+
+      LORA_LOG("HACK from %08lx brute=%u recon=%u vs fw=%d -> %d%% -> %s",
+               (unsigned long)hdr->from_id, p->brute, p->recon_count,
+               skillFirewall, pct, attackerWins ? "THEY WIN" : "HELD");
+
+      // Alert here rather than on HACK_RESULT: a modified attacker can decline
+      // to send HACK_RESULT, but cannot stop us knowing we were attacked.
+      pendingHackAlert       = true;
+      pendingHackFrom        = chipIdStr(hdr->from_id);
+      pendingHackAttackerWon = attackerWins;
       break;
     }
     case PKT_HACK_REPLY: {
@@ -619,16 +704,33 @@ void loraHandlePacket(uint8_t* buf, int len) {
         n->recon_values[n->recon_count] = p->firewall;
         n->recon_count++;
       }
+      if (hackInFlight && hackTargetId == p->hdr.from_id) {
+        hackInFlight        = false;
+        hackVerdictReady    = true;
+        hackVerdictWon      = (p->outcome == HACK_WIN);
+        hackVerdictFirewall = p->firewall;
+        hackVerdictFaction  = (char)p->faction;
+        LORA_LOG("hack verdict from %08lx: %s",
+                 (unsigned long)p->hdr.from_id, hackVerdictWon ? "WON" : "LOST");
+      }
       break;
     }
     case PKT_HACK_RESULT: {
       if (len < (int)sizeof(PktHackResult)) return;
       PktHackResult* p = (PktHackResult*)buf;
-      touchNode(hdr->from_id);
-      // Surface it — the defender previously had no idea they'd been hit.
-      pendingHackAlert       = true;
-      pendingHackFrom        = chipIdStr(hdr->from_id);
-      pendingHackAttackerWon = (p->outcome == HACK_WIN);
+      (void)p;
+      KnownNode* n = touchNode(hdr->from_id);
+      // T4.2 — a captured winning packet replayed later must grant nothing.
+      // seq is a rolling byte, so compare with signed wraparound arithmetic.
+      if (n && n->have_result_seq && (int8_t)(hdr->seq - n->last_result_seq) <= 0) {
+        loraReplaysDropped++;
+        LORA_LOG("REPLAY HACK_RESULT seq=%u from %08lx — rejected",
+                 hdr->seq, (unsigned long)hdr->from_id);
+        break;
+      }
+      if (n) { n->last_result_seq = hdr->seq; n->have_result_seq = true; }
+      // The alert already fired when we handled HACK_REQ and rolled the
+      // outcome ourselves; this packet only carries the attacker's XP delta.
       break;
     }
     case PKT_MSG: {
@@ -845,7 +947,7 @@ void loraTick() {
         if (st == RADIOLIB_ERR_NONE) {
           loraLastRSSI = (int)radio.getRSSI();
           loraLastSNR  = radio.getSNR();
-          loraHandlePacket(buf, pktLen);
+          if (loraVerifyFrame(buf, &pktLen)) loraHandlePacket(buf, pktLen);
         } else if (st == RADIOLIB_ERR_CRC_MISMATCH) {
           loraCrcErrors++;
           LORA_LOG("RX CRC mismatch (len=%d)", pktLen);

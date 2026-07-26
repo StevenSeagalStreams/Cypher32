@@ -225,6 +225,8 @@ String myFaction   = "NONE";
 // Note: millis() resets on reboot, so we persist a "boot epoch" offset
 // (bootEpoch) in preferences so timestamps survive reboots.
 String hackedList = "";
+String failList   = "";   // 12 h retry cooldowns (T4.4)
+String hackPendingId = "";   // target of the hack currently awaiting a verdict
 
 // 7 days in milliseconds
 #define WEEK_MS      604800000UL
@@ -284,6 +286,7 @@ void saveProgress() {
   preferences.putString("pw",     myPassword);
   preferences.putString("fac",    myFaction);
   preferences.putString("hacked", hackedList);
+  preferences.putString("failed", failList);
   preferences.putInt("lvl",    myLevel);
   preferences.putInt("xp",     myXP);
   preferences.putInt("sp",     skillPoints);
@@ -307,6 +310,7 @@ void loadProgress() {
   myPassword    = preferences.getString("pw",     "cypher32");
   myFaction     = preferences.getString("fac",    "NONE");
   hackedList    = preferences.getString("hacked", "");
+  failList      = preferences.getString("failed", "");
   myLevel       = preferences.getInt("lvl",    1);
   myXP          = preferences.getInt("xp",     0);
   skillPoints   = preferences.getInt("sp",     0);
@@ -322,45 +326,81 @@ void loadProgress() {
   preferences.end();
 }
 
-// ── Hacked list helpers ────────────────────────────────────────────────────
+// ── Cooldown lists (T4.4) ──────────────────────────────────────────────────
 // Format: "id:timestampMs,id:timestampMs,"
+//
+// Both lists are persisted to NVS and timestamped with nowMs(), which carries
+// across reboots. They are keyed by chip ID rather than living in the node
+// table, so neither a power cycle nor a node being aged out of range can be
+// used to clear a cooldown.
+//
+//   hackedList — 7-day lock after a successful hack
+//   failList   — 12-hour retry cooldown after a failed one
 
-// Check if we hacked this ID within the last 7 days
-bool recentlyHacked(String id) {
-  int start = hackedList.indexOf(id + ":");
+bool listHas(const String& list, const String& id, unsigned long window) {
+  int start = list.indexOf(id + ":");
   if (start == -1) return false;
   int colon = start + id.length() + 1;
-  int comma = hackedList.indexOf(",", colon);
+  int comma = list.indexOf(",", colon);
   if (comma == -1) return false;
-  unsigned long hackTime = hackedList.substring(colon, comma).toInt();
-  return (nowMs() - hackTime) < WEEK_MS;
+  unsigned long t = list.substring(colon, comma).toInt();
+  return (nowMs() - t) < window;
 }
 
-// Record a hack (or update existing entry with new timestamp)
-void recordHack(String id) {
-  // Remove old entry for this id if present
-  int start = hackedList.indexOf(id + ":");
+void listRecord(String& list, const String& id) {
+  int start = list.indexOf(id + ":");
   if (start != -1) {
-    int comma = hackedList.indexOf(",", start);
-    if (comma != -1) hackedList.remove(start, comma - start + 1);
+    int comma = list.indexOf(",", start);
+    if (comma != -1) list.remove(start, comma - start + 1);
   }
-  hackedList += id + ":" + String(nowMs()) + ",";
+  list += id + ":" + String(nowMs()) + ",";
 }
 
-// Clean up entries older than 7 days to keep string short
-void pruneHackedList() {
+void listPrune(String& list, unsigned long window) {
   String fresh = "";
-  String tmp = hackedList;
+  String tmp = list;
   while (tmp.indexOf(',') != -1) {
     String entry = tmp.substring(0, tmp.indexOf(','));
     tmp = tmp.substring(tmp.indexOf(',') + 1);
     int colon = entry.indexOf(':');
     if (colon == -1) continue;
-    String eid  = entry.substring(0, colon);
     unsigned long t = entry.substring(colon + 1).toInt();
-    if (nowMs() - t < WEEK_MS) fresh += entry + ",";
+    if (nowMs() - t < window) fresh += entry + ",";
   }
-  hackedList = fresh;
+  list = fresh;
+}
+
+bool recentlyHacked(String id) { return listHas(hackedList, id, WEEK_MS); }
+void recordHack(String id)     { listRecord(hackedList, id); }
+bool recentlyFailed(String id) { return listHas(failList, id, HALF_DAY_MS); }
+void recordFail(String id)     { listRecord(failList, id); }
+
+void pruneHackedList() {
+  listPrune(hackedList, WEEK_MS);
+  listPrune(failList,   HALF_DAY_MS);
+}
+
+// Remaining cooldown in ms, 0 if free — drives the portal's live countdowns.
+unsigned long hackCooldownLeft(String id) {
+  int start = hackedList.indexOf(id + ":");
+  if (start != -1) {
+    int colon = start + id.length() + 1;
+    int comma = hackedList.indexOf(",", colon);
+    if (comma != -1) {
+      unsigned long e = nowMs() - hackedList.substring(colon, comma).toInt();
+      if (e < WEEK_MS) return WEEK_MS - e;
+    }
+  }
+  start = failList.indexOf(id + ":");
+  if (start != -1) {
+    int colon = start + id.length() + 1;
+    int comma = failList.indexOf(",", colon);
+    if (comma != -1) {
+      unsigned long e = nowMs() - failList.substring(colon, comma).toInt();
+      if (e < HALF_DAY_MS) return HALF_DAY_MS - e;
+    }
+  }
+  return 0;
 }
 
 // ─────────────────────────────────────────────
@@ -1674,44 +1714,38 @@ void handleRecon() {
   server.sendHeader("Location", "/#nodes"); server.send(303);
 }
 
-// Hack — one attempt, resolves locally using known recon data
+// Hack — one attempt. The DEFENDER rolls and returns the verdict (T4.3), so
+// this only fires the request; loop() applies the outcome when it arrives.
 void handleHack() {
   if (!server.hasArg("id")) { server.sendHeader("Location","/#nodes"); server.send(303); return; }
-  String hexId = server.arg("id");
-  String nid   = hexId;   // already the 4-char hex string from web
+  String   hexId  = server.arg("id");
   uint32_t target = (uint32_t)strtoul(hexId.c_str(), nullptr, 16);
 
-  KnownNode* n = findOrAddNode(target);
-  if (!n || n->hack_attempted || recentlyHacked(nid)) {
-    server.sendHeader("Location", "/#nodes"); server.send(303); return;
-  }
+  KnownNode* n = findNode(target);
+  bool blocked = (!n) || (!loraReady) || hackInFlight ||
+                 recentlyHacked(hexId) || recentlyFailed(hexId);
 
-  // Determine enemy faction from node record
+  if (!blocked) {
+    hackPendingId = hexId;
+    loraHackStart(target, n->recon_count);
+  }
+  server.sendHeader("Location", "/#nodes"); server.send(303);
+}
+
+// Apply a verdict the defender sent us. Called from loop(), never from a
+// request handler, so nothing here blocks the radio.
+void resolveHackVerdict() {
+  String   nid    = hackPendingId;
+  uint32_t target = (uint32_t)strtoul(nid.c_str(), nullptr, 16);
+  bool     won    = hackVerdictWon;
+  int      enemyFW = hackVerdictFirewall;
+
   String enemyFaction = "NONE";
-  if      (n->faction=='B') enemyFaction="BLACK";
-  else if (n->faction=='W') enemyFaction="WHITE";
-  else if (n->faction=='R') enemyFaction="RED";
-  else if (n->faction=='G') enemyFaction="GREEN";
+  if      (hackVerdictFaction=='B') enemyFaction="BLACK";
+  else if (hackVerdictFaction=='W') enemyFaction="WHITE";
+  else if (hackVerdictFaction=='R') enemyFaction="RED";
+  else if (hackVerdictFaction=='G') enemyFaction="GREEN";
 
-  // Get enemy firewall — use recon data if available, else random
-  int enemyFW = 4;  // default estimate
-  for (int i=0; i<n->recon_count; i++) {
-    if (n->recon_types[i]==STAT_FIREWALL) { enemyFW=n->recon_values[i]; break; }
-  }
-  if (n->recon_count == 0) enemyFW = random(1,9);  // unknown — gamble
-
-  // Hack success chance:
-  //   Base: 60%
-  //   +5% per recon completed (max +15% for 3 recons)
-  //   Brute vs enemy FW: each point difference = +/-2%
-  //   Clamped 25%-90%
-  int pct = 60;
-  pct += n->recon_count * 5;
-  pct += (skillBrute - enemyFW) * 2;
-  pct = constrain(pct, 25, 90);
-  bool won = (random(0, 100) < pct);
-
-  // Resolve XP
   HackResult result;
   if (won) {
     result = resolveHack(enemyFaction, enemyFW);
@@ -1723,35 +1757,31 @@ void handleHack() {
     result.note = "Counter-hack detected.";
   }
 
-  // Record
-  n->hack_attempted = true;
-  n->hack_won       = won;
-  n->hack_time_ms   = millis();
-  bool lvlUp = false;
+  KnownNode* n = findNode(target);
+  if (n) {
+    n->hack_attempted = true;
+    n->hack_won       = won;
+    n->hack_time_ms   = millis();
+  }
 
-  // Tell the defender. Until v54 this packet was never transmitted by anyone —
-  // loraSendHackResult() existed but had no callers, so the target of a hack
-  // had no idea it had happened. Reliable send: retried and ACKed.
+  // Confirm to the defender, carrying our XP delta. They already know the
+  // outcome — they decided it — so this is a report, not the notification.
   if (loraReady) loraSendHackResult(target, won, (int8_t)constrain(result.xpDelta, -128, 127));
 
+  bool lvlUp = false;
   if (won) {
-    recordHack(nid);
+    recordHack(nid);                       // 7-day lock
     displayHackSuccess(nid, result.xpDelta, result.note);
     lvlUp = applyXP(result.xpDelta);
   } else {
+    recordFail(nid);                       // 12-hour retry cooldown (T4.4)
     displayHackFailed(nid, abs(result.xpDelta), result.note);
     applyXP(result.xpDelta);
   }
 
   saveProgress();
-
-  // Non-blocking hold. The old delay(4000)/delay(5000) pair kept the radio
-  // deaf for up to nine seconds right after a hack — exactly when the
-  // defender's ACK and any retry were in flight.
   if (lvlUp) { displayLevelUp(); revertIdleAtMs = millis() + 6000; }
   else                            revertIdleAtMs = millis() + 4000;
-
-  server.sendHeader("Location", "/#nodes"); server.send(303);
 }
 
 // Send message handler
@@ -1901,8 +1931,23 @@ void loop() {
     revertIdleAtMs = millis() + 5000;
   }
 
-  // Someone hacked US. Before v54 the defender was never told — HACK_RESULT
-  // existed in the protocol but nothing ever transmitted it.
+  // Our hack came back with the defender's verdict (T4.3).
+  if (hackVerdictReady) {
+    hackVerdictReady = false;
+    resolveHackVerdict();
+  }
+
+  // ...or the target never answered. Say so rather than inventing a result.
+  if (hackTimedOut) {
+    hackTimedOut = false;
+    shiftMood(-1);
+    displayHackFailed(hackPendingId, 0, "No response. Out of range?");
+    revertIdleAtMs = millis() + 4000;
+  }
+
+  // Someone hacked US. The alert is raised when their HACK_REQ arrives and we
+  // roll the outcome ourselves, so an attacker cannot suppress it by simply
+  // never sending a HACK_RESULT.
   if (pendingHackAlert) {
     pendingHackAlert = false;
     String who = pendingHackFrom;

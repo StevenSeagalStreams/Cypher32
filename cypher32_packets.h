@@ -99,12 +99,16 @@ struct PktReconReply {
 };
 
 struct PktHackReq {
-  PktHeader hdr;        // type=PKT_HACK_REQ
-  uint8_t   brute;      // attacker's brute force stat
+  PktHeader hdr;         // type=PKT_HACK_REQ
+  uint8_t   brute;       // attacker's brute force stat
+  uint8_t   recon_count; // how much recon the attacker did (0-3)
 };
 
+// T4.3: the defender rolls and reports the verdict, so a modified attacker
+// cannot simply declare itself the winner.
 struct PktHackReply {
   PktHeader hdr;        // type=PKT_HACK_REPLY
+  uint8_t   outcome;    // HACK_WIN / HACK_LOSE — decided by the DEFENDER
   uint8_t   firewall;   // defender's firewall stat
   uint8_t   faction;    // defender faction letter
 };
@@ -160,6 +164,10 @@ struct KnownNode {
   bool          hack_attempted;
   bool          hack_won;
   unsigned long hack_time_ms;
+
+  // Replay protection for inbound HACK_RESULT (T4.2)
+  uint8_t       last_result_seq;
+  bool          have_result_seq;
 
   char          msg_inbox[33];
   bool          msg_unread;

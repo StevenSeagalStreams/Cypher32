@@ -37,6 +37,12 @@ struct NodeCtx {
   int        lvl_, brute_, stealth_, fw_;
   int        acksRecv_, acksSent_, timeouts_, retries_, dups_, pktSent_, pktRecv_, cad_;
   LoraActionState action_;
+  // hack state (T4.3) — per device, must not bleed between the two instances
+  bool       hackAlert_, hackAlertWon_, hackInFlight_, hackVerdictReady_;
+  bool       hackVerdictWon_, hackTimedOut_;
+  uint32_t   hackTarget_;
+  uint8_t    hackVerdictFw_;
+  char        hackFrom_[16];
   std::vector<uint8_t> rxbuf_;
   size_t     sentSeen_;      // how many of radio.sent we've already drained
 };
@@ -54,6 +60,12 @@ void save(NodeCtx& c) {
   c.retries_ = loraRetries;   c.dups_ = loraDupsDropped;
   c.pktSent_ = loraPktSent;   c.pktRecv_ = loraPktRecv; c.cad_ = loraCadBusy;
   c.action_ = loraActionState;
+  c.hackAlert_ = pendingHackAlert; c.hackAlertWon_ = pendingHackAttackerWon;
+  c.hackInFlight_ = hackInFlight;  c.hackVerdictReady_ = hackVerdictReady;
+  c.hackVerdictWon_ = hackVerdictWon; c.hackTimedOut_ = hackTimedOut;
+  c.hackTarget_ = hackTargetId;    c.hackVerdictFw_ = hackVerdictFirewall;
+  strncpy(c.hackFrom_, pendingHackFrom.c_str(), sizeof(c.hackFrom_) - 1);
+  c.hackFrom_[sizeof(c.hackFrom_) - 1] = '\0';
   c.rxbuf_ = radio.rxBuf;
 }
 
@@ -69,6 +81,11 @@ void load(NodeCtx& c) {
   loraRetries = c.retries_;   loraDupsDropped = c.dups_;
   loraPktSent = c.pktSent_;   loraPktRecv = c.pktRecv_; loraCadBusy = c.cad_;
   loraActionState = c.action_;
+  pendingHackAlert = c.hackAlert_; pendingHackAttackerWon = c.hackAlertWon_;
+  hackInFlight = c.hackInFlight_;  hackVerdictReady = c.hackVerdictReady_;
+  hackVerdictWon = c.hackVerdictWon_; hackTimedOut = c.hackTimedOut_;
+  hackTargetId = c.hackTarget_;    hackVerdictFirewall = c.hackVerdictFw_;
+  pendingHackFrom = String(c.hackFrom_);
   radio.rxBuf = c.rxbuf_;
   radio.sent.clear();
   loraReady = true;
@@ -89,6 +106,9 @@ void initCtx(NodeCtx& c, uint32_t id, const char* fac, int brute, int fw) {
   c.acksRecv_ = c.acksSent_ = c.timeouts_ = c.retries_ = 0;
   c.dups_ = c.pktSent_ = c.pktRecv_ = c.cad_ = 0;
   c.action_ = LA_IDLE;
+  c.hackAlert_ = c.hackAlertWon_ = c.hackInFlight_ = false;
+  c.hackVerdictReady_ = c.hackVerdictWon_ = c.hackTimedOut_ = false;
+  c.hackTarget_ = 0; c.hackVerdictFw_ = 0; c.hackFrom_[0] = '\0';
   c.rxbuf_.clear();
   c.sentSeen_ = 0;
 }
@@ -223,20 +243,40 @@ int main() {
     save(A);
   }
 
-  // ── hack result reaches the defender ──
+  // ── full defender-authoritative hack exchange (T4.3) ──
   {
-    printf("hack notification\n");
+    printf("hack exchange\n");
     NodeCtx A, B; initCtx(A, ID_A, "BLACK", 12, 5); initCtx(B, ID_B, "WHITE", 6, 9);
     air.clear(); lossPercent = 0; g_millis = 1000;
 
-    load(A); loraSendHackResult(ID_B, true, 35); save(A);
-    runUntil(A, B, 5000, []{ return loraActionState == LA_SUCCESS; });
+    load(A); loraHackStart(ID_B, 2); save(A);
+    bool got = runUntil(A, B, 6000, []{ return hackVerdictReady; });
+    CHECK(got, "A receives a verdict from B");
+    load(A);
+    CHECK(!hackInFlight,               "A's hack resolved");
+    CHECK(hackVerdictFirewall == 9,    "A learns B's real firewall");
+    CHECK(hackVerdictFaction == 'W',   "A learns B's faction");
+    bool aThinksWon = hackVerdictWon;
+    save(A);
     load(B);
-    CHECK(pendingHackAlert,       "B is told it was hacked");
-    CHECK(pendingHackAttackerWon, "B learns the attacker won");
-    CHECK(pendingHackFrom == chipIdStr(ID_A), "B learns who did it");
-    pendingHackAlert = false;
+    CHECK(pendingHackAlert,            "B knows it was attacked");
+    CHECK(pendingHackFrom == chipIdStr(ID_A), "B knows who did it");
+    CHECK(pendingHackAttackerWon == aThinksWon,
+          "both sides agree on the outcome the DEFENDER decided");
     save(B);
+  }
+  {
+    // Attacking a device that is not there must fail cleanly.
+    printf("hack against absent target\n");
+    NodeCtx A, B; initCtx(A, ID_A, "BLACK", 12, 5); initCtx(B, ID_B, "WHITE", 6, 9);
+    air.clear(); lossPercent = 100; g_millis = 1000;
+
+    load(A); loraHackStart(ID_B, 1); save(A);
+    runUntil(A, B, 8000, []{ return hackTimedOut; });
+    load(A);
+    CHECK(hackTimedOut,      "reports the target never answered");
+    CHECK(!hackVerdictReady, "and never invents a local verdict");
+    save(A);
   }
 
   // ── lossy channel: does retry actually rescue the exchange? ──
