@@ -29,7 +29,8 @@ void resetAll() {
   g_millis = 1000; g_rngState = 12345;
   memset(txq, 0, sizeof(txq));
   memset(seenRing, 0, sizeof(seenRing)); seenIdx = 0;
-  memset(&pendingTx, 0, sizeof(pendingTx));
+  memset(&pendingUser, 0, sizeof(pendingUser));
+  memset(&pendingReply, 0, sizeof(pendingReply));
   memset(knownNodes, 0, sizeof(knownNodes)); knownCount = 0;
   txSeq = 0; loraDioFlag = false; radioState = RS_RX;
   loraReady = true;
@@ -106,9 +107,9 @@ int main() {
   {
     resetAll();
     loraSendRecon(PEER);
-    CHECK(pendingTx.active,                   "reliable slot occupied");
+    CHECK(pendingUser.active,                   "reliable slot occupied");
     CHECK(loraActionState == LA_SENDING,      "action state = SENDING");
-    uint8_t seq = pendingTx.seq;
+    uint8_t seq = pendingUser.seq;
     run(30);
     CHECK(sentCountOfType(PKT_RECON_REQ) == 1, "request went out once");
     CHECK(loraActionState == LA_WAITING,       "action state = WAITING after TX");
@@ -117,19 +118,19 @@ int main() {
     mkHdr(&ack.hdr, PKT_ACK, seq, PKTFLAG_IS_ACK, PEER, myChipID32);
     ack.ack_type = PKT_RECON_REQ;
     deliver(&ack, sizeof(ack));
-    CHECK(!pendingTx.active,                  "matching ACK clears the slot");
+    CHECK(!pendingUser.active,                  "matching ACK clears the slot");
     CHECK(loraActionState == LA_SUCCESS,      "action state = SUCCESS");
     CHECK(loraAcksRecv == 1,                  "ACK counted");
   }
   {
     resetAll();
     loraSendRecon(PEER);
-    uint8_t seq = pendingTx.seq;
+    uint8_t seq = pendingUser.seq;
     PktAck ack;
     mkHdr(&ack.hdr, PKT_ACK, (uint8_t)(seq + 9), PKTFLAG_IS_ACK, PEER, myChipID32);
     ack.ack_type = PKT_RECON_REQ;
     deliver(&ack, sizeof(ack));
-    CHECK(pendingTx.active, "ACK with wrong seq does NOT clear the slot");
+    CHECK(pendingUser.active, "ACK with wrong seq does NOT clear the slot");
   }
   {
     // Peer is dead: expect retries then a clean timeout, not a silent hang.
@@ -140,7 +141,7 @@ int main() {
     CHECK(loraTimeouts == 1,             "timeout counted");
     CHECK(loraRetries == TX_MAX_TRIES-1, "retried TX_MAX_TRIES-1 times");
     CHECK(sentCountOfType(PKT_RECON_REQ) == TX_MAX_TRIES, "4 transmissions total");
-    CHECK(!pendingTx.active,             "slot released");
+    CHECK(!pendingUser.active,             "slot released");
   }
   {
     // Roadmap acceptance: portal reports TIMEOUT within ~3 s.
@@ -151,6 +152,42 @@ int main() {
     uint32_t elapsed = millis() - t0;
     CHECK(elapsed < 3500, "timeout surfaces in under 3.5 s");
     printf("       (timeout after %u ms)\n", elapsed);
+  }
+
+  // ── reply slot must survive a concurrent local action ──
+  printf("slot separation\n");
+  {
+    resetAll();
+    PktReconReq req;
+    mkHdr(&req.hdr, PKT_RECON_REQ, 5, PKTFLAG_ACK_REQ, PEER, myChipID32);
+    deliver(&req, sizeof(req));                    // we owe PEER an answer
+    CHECK(pendingReply.active,                     "reply occupies the reply slot");
+    CHECK(pendingReply.type == PKT_RECON_REPLY,    "correct frame held for retry");
+    CHECK(!pendingUser.active,                     "player's slot untouched");
+
+    loraSendRecon(0xCCCC3333);                     // player acts a moment later
+    CHECK(pendingReply.active,                     "in-flight reply NOT evicted");
+    CHECK(pendingReply.type == PKT_RECON_REPLY,    "peer still gets its answer retried");
+    CHECK(pendingUser.active,                      "player's action also in flight");
+    CHECK(pendingUser.type == PKT_RECON_REQ,       "player's frame in the user slot");
+    CHECK(loraActionState == LA_SENDING,           "portal tracks the player's action");
+  }
+  {
+    // A background reply completing must not overwrite the portal's status.
+    resetAll();
+    loraSendRecon(0xCCCC3333);
+    run(30);
+    CHECK(loraActionState == LA_WAITING, "player's action is WAITING");
+    PktReconReq req;
+    mkHdr(&req.hdr, PKT_RECON_REQ, 5, PKTFLAG_ACK_REQ, PEER, myChipID32);
+    deliver(&req, sizeof(req));
+    PktAck ack;                                    // PEER acks our reply
+    mkHdr(&ack.hdr, PKT_ACK, pendingReply.seq, PKTFLAG_IS_ACK, PEER, myChipID32);
+    ack.ack_type = PKT_RECON_REPLY;
+    deliver(&ack, sizeof(ack));
+    CHECK(!pendingReply.active,          "reply slot cleared by its ACK");
+    CHECK(loraActionState == LA_WAITING, "portal status NOT clobbered by background traffic");
+    CHECK(pendingUser.active,            "player's action still pending");
   }
 
   // ── T1.3 deferred replies (fixes D3) ──
@@ -236,14 +273,14 @@ int main() {
     PktHeader* h = (PktHeader*)radio.sent[0].data.data();
     CHECK(h->to_id == 0,                        "beacon is broadcast");
     CHECK(!(h->flags & PKTFLAG_ACK_REQ),        "beacon does not request an ACK");
-    CHECK(!pendingTx.active,                    "beacon does not occupy the reliable slot");
+    CHECK(!pendingUser.active,                    "beacon does not occupy the reliable slot");
     CHECK(radio.sent[0].data.size() == sizeof(PktBeacon), "beacon size matches struct");
   }
   {
     resetAll();
     loraSendHackResult(PEER, true, 42);
-    CHECK(pendingTx.active,               "HACK_RESULT is sent reliably");
-    CHECK(pendingTx.type == PKT_HACK_RESULT, "correct type in flight");
+    CHECK(pendingUser.active,               "HACK_RESULT is sent reliably");
+    CHECK(pendingUser.type == PKT_HACK_RESULT, "correct type in flight");
   }
   {
     // The defender must actually learn they were hit.

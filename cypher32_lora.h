@@ -247,11 +247,19 @@ struct PendingTx {
   uint8_t  triesLeft;
   uint32_t nextAttemptMs;
   bool     active;
-  bool     userAction;   // true = this is the local player's action, so its
-                         // outcome drives the portal's SENDING/SUCCESS/TIMEOUT
-                         // display. Background replies must not clobber that.
 };
-PendingTx pendingTx = {};
+
+// Two slots, deliberately — the roadmap called for one.
+//
+// One is right for the local player: you never have two hacks in flight. But
+// replies carry the game payload, so they are retried too (see deferReply),
+// and a device answering someone else's recon can have its own player press a
+// button a moment later. With a single slot that action would evict the reply
+// mid-retry. The requester has already had its request ACKed, so it never asks
+// again — and sits on SUCCESS with no stat to show. That is the exact failure
+// this phase exists to remove, so the two kinds of traffic get separate slots.
+PendingTx pendingUser  = {};   // local player's action — drives portal status
+PendingTx pendingReply = {};   // answering a peer — silent, never touches the UI
 
 // Fire-and-forget. Used for broadcasts (beacons) and ACKs.
 bool loraSendUnreliable(void* pkt, int len) {
@@ -261,22 +269,27 @@ bool loraSendUnreliable(void* pkt, int len) {
   return enqueueTx(pkt, len);
 }
 
-// Reliable unicast: ACK requested, retried up to TX_MAX_TRIES.
+// Arm one slot with a frame and hand it to the TX queue.
+static bool armSlot(PendingTx& slot, void* pkt, int len, uint32_t delayMs) {
+  PktHeader* h = (PktHeader*)pkt;
+  h->flags |= PKTFLAG_ACK_REQ;
+  memcpy(slot.buf, pkt, len);
+  slot.len           = (uint8_t)len;
+  slot.to_id         = h->to_id;
+  slot.seq           = h->seq;
+  slot.type          = h->type;
+  slot.triesLeft     = TX_MAX_TRIES - 1;
+  slot.nextAttemptMs = millis() + delayMs + TX_RETRY_BASE_MS + random(0, TX_RETRY_JITTER_MS);
+  slot.active        = true;
+  return enqueueTx(pkt, len, delayMs);
+}
+
+// Reliable unicast for the local player's action: ACK requested, retried up to
+// TX_MAX_TRIES, outcome shown in the portal.
 bool loraSendReliable(void* pkt, int len, const char* label) {
   if (!loraReady || len <= 0 || len > 64) return false;
   PktHeader* h = (PktHeader*)pkt;
-  h->seq    = txSeq++;
-  h->flags |= PKTFLAG_ACK_REQ;
-
-  memcpy(pendingTx.buf, pkt, len);
-  pendingTx.len           = (uint8_t)len;
-  pendingTx.to_id         = h->to_id;
-  pendingTx.seq           = h->seq;
-  pendingTx.type          = h->type;
-  pendingTx.triesLeft     = TX_MAX_TRIES - 1;
-  pendingTx.nextAttemptMs = millis() + TX_RETRY_BASE_MS + random(0, TX_RETRY_JITTER_MS);
-  pendingTx.active        = true;
-  pendingTx.userAction    = true;
+  h->seq = txSeq++;
 
   loraActionState = LA_SENDING;
   loraActionLabel = String(label);
@@ -284,23 +297,22 @@ bool loraSendReliable(void* pkt, int len, const char* label) {
 
   LORA_LOG("TX-REL %s seq=%u to=%08lx len=%d", pktTypeName(h->type),
            h->seq, (unsigned long)h->to_id, len);
-  return enqueueTx(pkt, len);
+  return armSlot(pendingUser, pkt, len, 0);
 }
 
-void clearPendingTx(bool success) {
-  if (!pendingTx.active) return;
-  bool wasUser = pendingTx.userAction;
-  pendingTx.active = false;
-  if (wasUser) loraActionState = success ? LA_SUCCESS : LA_TIMEOUT;
+static void clearSlot(PendingTx& slot, bool success) {
+  if (!slot.active) return;
+  slot.active = false;
+  if (&slot == &pendingUser) loraActionState = success ? LA_SUCCESS : LA_TIMEOUT;
   if (!success) {
     loraTimeouts++;
     LORA_LOG("TIMEOUT %s seq=%u — no ACK after %d tries",
-             pktTypeName(pendingTx.type), pendingTx.seq, TX_MAX_TRIES);
+             pktTypeName(slot.type), slot.seq, TX_MAX_TRIES);
   }
 }
 
-// True while a reliable frame is awaiting its ACK — the portal polls this.
-bool loraActionPending() { return pendingTx.active; }
+// True while the player's own action is awaiting its ACK — the portal polls this.
+bool loraActionPending() { return pendingUser.active; }
 
 // ─────────────────────────────────────────────
 //  Packet constructors
@@ -370,19 +382,10 @@ static void deferReply(void* pkt, int len) {
   uint32_t delayMs = REPLY_DELAY_MIN_MS + random(0, REPLY_DELAY_JIT_MS);
   h->seq = txSeq++;
 
-  if (!pendingTx.active) {
-    h->flags |= PKTFLAG_ACK_REQ;
-    memcpy(pendingTx.buf, pkt, len);
-    pendingTx.len           = (uint8_t)len;
-    pendingTx.to_id         = h->to_id;
-    pendingTx.seq           = h->seq;
-    pendingTx.type          = h->type;
-    pendingTx.triesLeft     = TX_MAX_TRIES - 1;
-    pendingTx.nextAttemptMs = millis() + delayMs + TX_RETRY_BASE_MS
-                              + random(0, TX_RETRY_JITTER_MS);
-    pendingTx.active        = true;
-    pendingTx.userAction    = false;   // background — don't touch the portal state
-  }
+  // Reply slot free: send it reliably so a dropped answer gets retried.
+  // Already answering someone else: fall back to a single unreliable send
+  // rather than abandoning the earlier peer mid-retry.
+  if (!pendingReply.active) { armSlot(pendingReply, pkt, len, delayMs); return; }
   enqueueTx(pkt, len, delayMs);
 }
 
@@ -419,11 +422,13 @@ void loraHandlePacket(uint8_t* buf, int len) {
   // ── ACK handling (T1.2) ──
   if (hdr->flags & PKTFLAG_IS_ACK) {
     loraAcksRecv++;
-    if (pendingTx.active && pendingTx.to_id == hdr->from_id &&
-        pendingTx.seq == hdr->seq) {
-      LORA_LOG("ACK matched seq=%u — %s delivered", hdr->seq,
-               pktTypeName(pendingTx.type));
-      clearPendingTx(true);
+    PktHeader* a = hdr;
+    for (PendingTx* s : { &pendingUser, &pendingReply }) {
+      if (s->active && s->to_id == a->from_id && s->seq == a->seq) {
+        LORA_LOG("ACK matched seq=%u — %s delivered", a->seq, pktTypeName(s->type));
+        clearSlot(*s, true);
+        break;
+      }
     }
     return;
   }
@@ -615,7 +620,7 @@ static void serviceTxQueue() {
   LORA_LOG("TX %s seq=%u to=%08lx len=%u", pktTypeName(h->type), h->seq,
            (unsigned long)h->to_id, txq[idx].len);
 
-  if (pendingTx.active && pendingTx.seq == h->seq && loraActionState == LA_SENDING)
+  if (pendingUser.active && pendingUser.seq == h->seq && loraActionState == LA_SENDING)
     loraActionState = LA_WAITING;
 
   txq[idx].active = false;
@@ -624,20 +629,25 @@ static void serviceTxQueue() {
   loraPktSent++;
 }
 
-// Retry / expire the reliable slot (T1.2).
-static void servicePendingTx() {
-  if (!pendingTx.active) return;
-  if ((int32_t)(millis() - pendingTx.nextAttemptMs) < 0) return;
+// Retry / expire one reliable slot (T1.2).
+static void serviceSlot(PendingTx& slot) {
+  if (!slot.active) return;
+  if ((int32_t)(millis() - slot.nextAttemptMs) < 0) return;
 
-  if (pendingTx.triesLeft == 0) { clearPendingTx(false); return; }
+  if (slot.triesLeft == 0) { clearSlot(slot, false); return; }
 
-  pendingTx.triesLeft--;
-  pendingTx.nextAttemptMs = millis() + TX_RETRY_BASE_MS + random(0, TX_RETRY_JITTER_MS);
+  slot.triesLeft--;
+  slot.nextAttemptMs = millis() + TX_RETRY_BASE_MS + random(0, TX_RETRY_JITTER_MS);
   loraRetries++;
-  loraActionTries++;
-  LORA_LOG("RETRY %s seq=%u (%u left)", pktTypeName(pendingTx.type),
-           pendingTx.seq, pendingTx.triesLeft);
-  enqueueTx(pendingTx.buf, pendingTx.len);
+  if (&slot == &pendingUser) loraActionTries++;
+  LORA_LOG("RETRY %s seq=%u (%u left)", pktTypeName(slot.type),
+           slot.seq, slot.triesLeft);
+  enqueueTx(slot.buf, slot.len);
+}
+
+static void servicePendingTx() {
+  serviceSlot(pendingUser);
+  serviceSlot(pendingReply);
 }
 
 // Re-arm RX periodically; full re-init after repeated failure (T1.6).
@@ -719,8 +729,10 @@ String statTypeName(uint8_t t) {
 }
 
 char factionChar() {
-  if (myFaction=="BLACK") return 'B'; if (myFaction=="WHITE") return 'W';
-  if (myFaction=="RED")   return 'R'; if (myFaction=="GREEN") return 'G';
+  if (myFaction == "BLACK") return 'B';
+  if (myFaction == "WHITE") return 'W';
+  if (myFaction == "RED")   return 'R';
+  if (myFaction == "GREEN") return 'G';
   return '?';
 }
 

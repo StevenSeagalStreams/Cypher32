@@ -25,7 +25,7 @@ struct NodeCtx {
   TxFrame    txq_[TXQ_SIZE];
   SeenEntry  seen_[SEEN_RING_SIZE];
   int        seenIdx_;
-  PendingTx  pending_;
+  PendingTx  pendingU_, pendingR_;
   KnownNode  nodes_[MAX_KNOWN_NODES];
   int        knownCount_;
   uint8_t    txSeq_;
@@ -44,7 +44,7 @@ struct NodeCtx {
 void save(NodeCtx& c) {
   memcpy(c.txq_, txq, sizeof(txq));
   memcpy(c.seen_, seenRing, sizeof(seenRing)); c.seenIdx_ = seenIdx;
-  c.pending_ = pendingTx;
+  c.pendingU_ = pendingUser; c.pendingR_ = pendingReply;
   memcpy(c.nodes_, knownNodes, sizeof(knownNodes)); c.knownCount_ = knownCount;
   c.txSeq_ = txSeq; c.rs_ = radioState; c.txStart_ = txStartMs; c.dio_ = loraDioFlag;
   c.chipId_ = myChipID32;
@@ -60,7 +60,7 @@ void save(NodeCtx& c) {
 void load(NodeCtx& c) {
   memcpy(txq, c.txq_, sizeof(txq));
   memcpy(seenRing, c.seen_, sizeof(seenRing)); seenIdx = c.seenIdx_;
-  pendingTx = c.pending_;
+  pendingUser = c.pendingU_; pendingReply = c.pendingR_;
   memcpy(knownNodes, c.nodes_, sizeof(knownNodes)); knownCount = c.knownCount_;
   txSeq = c.txSeq_; radioState = c.rs_; txStartMs = c.txStart_; loraDioFlag = c.dio_;
   myChipID32 = c.chipId_; myFaction = String(c.fac_);
@@ -79,7 +79,8 @@ void initCtx(NodeCtx& c, uint32_t id, const char* fac, int brute, int fw) {
   // blanket memset over the whole struct would corrupt it.
   memset(c.txq_,   0, sizeof(c.txq_));
   memset(c.seen_,  0, sizeof(c.seen_));   c.seenIdx_    = 0;
-  memset(&c.pending_, 0, sizeof(c.pending_));
+  memset(&c.pendingU_, 0, sizeof(c.pendingU_));
+  memset(&c.pendingR_, 0, sizeof(c.pendingR_));
   memset(c.nodes_, 0, sizeof(c.nodes_));  c.knownCount_ = 0;
   c.txSeq_ = 0; c.rs_ = RS_RX; c.txStart_ = 0; c.dio_ = false;
   c.chipId_ = id;
