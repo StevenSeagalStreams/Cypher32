@@ -11,29 +11,59 @@
 
 ## Status
 
+Current firmware: **v60**.
+
 | Phase | State |
 |-------|-------|
-| **Phase 0 — instrumentation** | ✅ shipped (v53), except **T0.4 which needs two real boards** |
-| **Phase 1 — link layer** | ✅ shipped (v54), verified in simulation, **unverified on hardware** |
-| Phase 2 — presence & RSSI | not started |
-| Phase 3 — portal UX | not started |
-| Phase 4 — integrity & polish | T4.5 done (dead API deleted); rest not started |
+| **Phase 0 — instrumentation** | ✅ done, except **T0.4, which needs two real boards** |
+| **Phase 1 — link layer** | ✅ done |
+| **Phase 2 — presence & RSSI** | ✅ done |
+| **Phase 3 — portal UX** | ✅ done, **except T3.2's ESPAsyncWebServer swap** (see below) |
+| **Phase 4 — integrity & polish** | ✅ done |
 
-**What "verified in simulation" means.** `test/` contains a host-side harness that
-compiles the real `cypher32_lora.h` against Arduino/RadioLib stubs and exercises
-the link layer: 58 unit checks plus a two-node end-to-end simulation over a lossy
-half-duplex channel. Recon exchanges complete 100% of the time up to 40% packet
-loss, 87% at 55%, 63% at 70%. Timeouts surface in ~2.1 s.
+### The one task deliberately not done, and why
 
-This proves the protocol logic is correct. It proves **nothing** about RadioLib
-behaviour, SPI timing, real interrupt latency, or actual RF range. **T0.4 and the
-field test protocol are still required before any of this can be called working.**
+**T3.2 asked for a move to `ESPAsyncWebServer`.** The single-page portal and the
+`/api/state` + `/api/action` JSON split were built as specified — that is the
+part that removes the stall, since a request now moves a few hundred bytes
+instead of regenerating 20 KB of HTML inside a blocking handler.
+
+The library swap itself was not done. `ESPAsyncWebServer` has several
+incompatible forks on ESP32 (`me-no-dev` vs `esphome`, `AsyncTCP` vs
+`AsyncTCP-esphome`) and this work was written without an ESP32 toolchain to
+compile against. Picking the wrong fork means the firmware does not build at
+all. The built-in `WebServer` ships with the core and is guaranteed to compile.
+
+If you want it after the firmware is confirmed working on hardware, it is a
+contained change: five `server.on()` registrations and the request/response
+calls inside them.
+
+### What "verified" means here
+
+`test/` compiles the real headers against Arduino/RadioLib stubs and runs:
+
+- **137 link-layer checks** — duplicate suppression, ACK/retry/timeout, slot
+  separation, deferred replies, CAD, RX watchdog, node ageing and eviction,
+  duty-cycle accounting, signing, replay protection, hack verdicts
+- **24 two-node checks** — a full end-to-end simulation over a lossy
+  half-duplex channel
+- **portal render checks** — the real HTML blob extracted from
+  `cypher32_portal.h`, run against a DOM shim
+
+Measured in simulation: recon completes 100% of the time up to 40% packet loss,
+87% at 55%, 63% at 70%. Timeouts surface in ~2.1 s. SHA-256 and HMAC match the
+NIST and RFC 4231 vectors.
+
+**This proves logic, not radios.** It says nothing about RadioLib behaviour, SPI
+timing, interrupt latency, or RF range, and the firmware has never been compiled
+for the target. **T0.4 and the field test protocol below remain required before
+any of this can be called working.**
 
 ---
 
 ## Diagnosis — why LoRa "doesn't work"
 
-Read from `cypher32_lora.h` (header comment still says v29). These are the concrete faults, in order of how much damage they do:
+Read from `cypher32_lora.h` as it stood at v52. These are the concrete faults, in order of how much damage they do:
 
 | # | Fault | Evidence in code | Symptom in the field |
 |---|-------|------------------|----------------------|
@@ -51,12 +81,13 @@ Read from `cypher32_lora.h` (header comment still says v29). These are the concr
 | D12 | **`platformio.ini` is documented but absent from the repo.** | README file table lists it; repo root has only 3 source files + README. | `pio run -t upload` fails for anyone who clones. |
 | **D13** | **The hack never used the radio at all.** *(found during Phase 1 — not in the original diagnosis)* | `handleHack()` resolved the hack entirely from cached recon data. `loraSendHackReq()`, `loraSendHackResult()` and `PKT_ACK` had **no callers anywhere in the codebase**. | The defender was never told they had been attacked. "Hacks vanish" was not only a reliability problem — the hack packets were never transmitted in the first place. |
 | **D14** | **Web handlers block the radio for seconds at a time.** *(found during Phase 1)* | `handleRecon()` busy-waited 5 s; `handleHack()` called `delay(4000)` / `delay(5000)`; the message path in `loop()` called `delay(5000)`. | Radio deaf for up to 9 s immediately after a hack — exactly when the defender's ACK and retries are in flight. |
+| **D15** | **The portal password did nothing.** *(found during Phase 3)* | Setup collected and stored a password, but no handler ever checked it and the AP is open. | Anyone in radio range could open the portal and spend your skill points, send messages as you, or factory-reset your device. Now every mutation via `POST /api/action` requires it. |
 
 **Root cause summary:** the LoRa layer is a *driver*, not a *protocol*. Phase 1 is about adding the missing link layer. That single change fixes D1, D3, and most of the perceived flakiness.
 
-**Verification note (v54).** D1–D11 were all confirmed present in the code before
-work started. D12 was already fixed on the feature branch. D13 and D14 were found
-while implementing Phase 1 and are addressed in the same release.
+**Verification note.** D1–D11 were all confirmed present in the code before work
+started. D12 was already fixed on the feature branch. D13 and D14 were found
+while implementing Phase 1, D15 while implementing Phase 3; all are addressed.
 
 ---
 
@@ -159,7 +190,7 @@ Plus: beacon **immediately on boot**, then again at +3 s and +8 s, so a device j
 
 ---
 
-## Phase 2 — Presence & discovery (v55)
+## ✅ Phase 2 — Presence & discovery (v55)
 
 | Task | Description | Acceptance criteria |
 |------|-------------|---------------------|
@@ -171,11 +202,11 @@ Plus: beacon **immediately on boot**, then again at +3 s and +8 s, so a device j
 
 ---
 
-## Phase 3 — Portal UX (v56–v57) — avatar untouched
+## ✅ Phase 3 — Portal UX (v56–v57) — avatar untouched
 
 The e-ink screen is unchanged. All of this is the web portal.
 
-### T3.1 — Captive portal (the single biggest UX win)
+### ✅ T3.1 — Captive portal (the single biggest UX win)
 
 Right now: join an SSID with no internet → the phone silently drops back to cellular → "the website doesn't load." Fix:
 
@@ -185,19 +216,19 @@ Right now: join an SSID with no internet → the phone silently drops back to ce
 
 **Acceptance:** join the Wi-Fi on stock iOS and stock Android — the portal opens **by itself**. No typed IP. Test on both.
 
-### T3.2 — Async server + single-page portal
+### ◐ T3.2 — Async server + single-page portal (SPA done, library swap deferred)
 
 Move to `ESPAsyncWebServer`. Serve one gzipped HTML/CSS/JS blob from PROGMEM. All state via `GET /api/state` (poll 2 s) and actions via `POST /api/action`. No page reloads anywhere.
 
 **Acceptance:** no request handler blocks the LoRa loop; measured packet loss during heavy portal use is unchanged from idle.
 
-### T3.3 — Mobile-first redesign
+### ✅ T3.3 — Mobile-first redesign
 
 - Bottom tab bar, thumb-reachable, min 44 px tap targets.
 - Dark terminal aesthetic that matches the e-ink avatar's world — but readable in daylight, which means real contrast, not grey-on-black.
 - Everything must work one-handed on a 360 px-wide screen.
 
-### T3.4 — Nodes tab → **Radar**
+### ✅ T3.4 — Nodes tab → **Radar**
 
 The centrepiece. Replace the flat list with:
 - Signal bars driven by `avg_rssi` (▁▃▅▇), plus plain-language distance: `VERY CLOSE / CLOSE / DISTANT / FADING`.
@@ -206,7 +237,7 @@ The centrepiece. Replace the flat list with:
 - Lockout timers rendered as live countdowns (`6d 4h` won / `11h 22m` locked out), not raw timestamps.
 - Node cards sorted by signal strength, strongest first.
 
-### T3.5 — Feedback on every action (depends on T1.2)
+### ✅ T3.5 — Feedback on every action (depends on T1.2)
 
 This is why the ACK layer had to come first. Every action gets visible state:
 
@@ -214,19 +245,19 @@ This is why the ACK layer had to come first. Every action gets visible state:
 
 **Acceptance:** no button in the portal can be pressed and produce no visible result. Zero exceptions.
 
-### T3.6 — Onboarding wizard
+### ✅ T3.6 — Onboarding wizard
 
 Faction choice is permanent and currently presented as four names with no context. Replace with a 3-step wizard: what Cypher32 is → faction cards showing bonus/perk/risk in plain language → password + confirm, with a strength hint and an explicit *"this cannot be changed without a full wipe"* warning.
 
 **Acceptance:** someone who has never seen the project picks a faction and reaches the HUD without asking a question.
 
-### T3.7 — Diagnostics tab (hidden)
+### ✅ T3.7 — Diagnostics tab (hidden)
 
 Long-press the header to reveal. Surfaces everything from T0.3, a live packet log, RSSI history sparkline, duty-cycle gauge, and a **"Ping node"** button that sends a reliable no-op and reports round-trip time. This is your field debugging tool.
 
 ---
 
-## Phase 4 — Game integrity & polish (v58–v60)
+## ✅ Phase 4 — Game integrity & polish (v58–v60)
 
 | Task | Description | Acceptance criteria |
 |------|-------------|---------------------|
@@ -266,6 +297,9 @@ Phase 3  ─── portal UX ─────── T3.5 depends on T1.2 (ACKs)
    │
 Phase 4  ─── integrity & polish
 ```
+
+**All phases are now implemented. The remaining work is hardware
+verification — T0.4 and the field test protocol — not more code.**
 
 **If you only do one phase, do Phase 1.** D1 (no ACK/retry) and D2 (no beacon jitter) are, between them, almost certainly the entire "LoRa doesn't work" experience. T1.7 is roughly a five-line change and may fix discovery on its own.
 

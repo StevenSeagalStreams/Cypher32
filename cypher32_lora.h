@@ -5,9 +5,9 @@
 #include "cypher32_crypto.h"
 
 // ─────────────────────────────────────────────
-//  CYPHER32 LORA — v54
+//  CYPHER32 LORA — v60
 //
-//  Roadmap Phase 0 (instrumentation) + Phase 1 (link layer).
+//  Roadmap Phases 0-2 and the protocol half of Phase 4.
 //
 //  What changed from v29, and why:
 //
@@ -18,6 +18,10 @@
 //   D5  no RX watchdog   → 10 s re-arm + 3-strike re-init     (T1.6)
 //   D9  no TX diags      → error codes captured, counters     (T0.2)
 //   D10 lying API        → loraSendReconStat() deleted        (T4.5)
+//   D7  global RSSI      → per-node signal + rolling average   (T2.1)
+//   D8  ghost nodes      → TTL, eviction, rollover-safe ages   (T2.2/T2.3)
+//   D11 forgeable        → HMAC-signed frames, replay guard    (T4.1/T4.2)
+//   D13 hack never sent  → full HACK_REQ/REPLY exchange        (T4.3)
 //
 //  NOTE ON THE DIO1 HANDLER
 //  v29 used setPacketReceivedAction(). That is an RX-only wrapper around
@@ -1033,6 +1037,7 @@ float loraDeliveryRatio() {
 // T0.3 — every counter in one JSON blob.
 String loraDiagJson() {
   String j = "{";
+  j += "\"version\":\""     + String(FIRMWARE_VERSION) + "\",";
   j += "\"status\":\""      + loraStatus + "\",";
   j += "\"ready\":"         + String(loraReady ? "true" : "false") + ",";
   j += "\"initError\":"     + String(loraInitError) + ",";

@@ -2,9 +2,12 @@
 #include <WiFi.h>
 #include <Preferences.h>
 #include <WebServer.h>
+#include <DNSServer.h>
+#include <ESPmDNS.h>
 #include <esp_task_wdt.h>
 #include "cypher32_packets.h"
 #include "cypher32_lora.h"
+#include "cypher32_portal.h"
 
 // Heltec Wireless Paper V1.2 — 250x122px landscape
 // Pointer: constructor must NOT run at global init time (before Vext is on)
@@ -12,6 +15,7 @@ EInkDisplay_WirelessPaperV1_2* displayPtr = nullptr;
 #define display (*displayPtr)
 
 Preferences preferences;
+DNSServer dnsServer;
 WebServer* serverPtr = nullptr;
 #define server (*serverPtr)
 
@@ -1000,7 +1004,39 @@ void drawFooter() {
 //  DISPLAY STATES
 // ─────────────────────────────────────────────
 
+// ── E-ink refresh budget (T4.6) ──────────────
+//
+//  A full refresh costs roughly two seconds and a visible flash. The device
+//  used to redraw on the 10-minute mood timer whether or not anything had
+//  actually changed, which is most of the time. Hashing the visible state and
+//  skipping identical redraws removes those without touching the avatar
+//  rendering itself, which the roadmap puts off limits.
+uint32_t displayRefreshes = 0;
+uint32_t displaySkipped   = 0;
+uint32_t lastIdleSig      = 0xFFFFFFFF;
+
+uint32_t idleSignature() {
+  uint32_t h = 2166136261u;
+  int vals[] = { myLevel, myXP / 10, skillBrute, skillStealth, skillFirewall,
+                 cyMood, getBatteryPercent() / 5, knownCount, skillPoints };
+  for (unsigned i = 0; i < sizeof(vals)/sizeof(vals[0]); i++) {
+    h ^= (uint32_t)(vals[i] + 128);
+    h *= 16777619u;
+  }
+  return h;
+}
+
+// Returns false when the idle screen would be pixel-identical to what is
+// already on the panel.
+bool idleNeedsRefresh() {
+  uint32_t sig = idleSignature();
+  if (sig == lastIdleSig) { displaySkipped++; return false; }
+  lastIdleSig = sig;
+  return true;
+}
+
 void displayIdle() {
+  displayRefreshes++;
   display.clearMemory(); display.landscape(); drawHeader();
   driftMood();
   // Large sprite fills most of the content zone
@@ -1129,535 +1165,213 @@ String factionFromSSID(String ssid) {
 //  WEB PORTAL
 // ─────────────────────────────────────────────
 
-void handleRoot() {
-  String html = "<html><head><meta charset='UTF-8'>"
-    "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-    "<style>"
-    "body{font-family:'Courier New',monospace;background:#000;color:#0f0;margin:0;padding:0;max-width:480px;margin:auto}"
-    ".nav{display:flex;border-bottom:1px solid #0a3a0a;overflow-x:auto;scrollbar-width:none;position:sticky;top:0;background:#000;z-index:9}"
-    ".nav::-webkit-scrollbar{display:none}"
-    ".tab{flex:0 0 auto;padding:10px 14px;font-size:12px;color:#0a8c0a;cursor:pointer;border-bottom:2px solid transparent;text-decoration:none}"
-    ".tab.a{color:#0f0;border-bottom-color:#0f0}"
-    ".pg{display:none;padding:12px}"
-    ".pg.a{display:block}"
-    ".card{border:1px solid #0a3a0a;border-radius:5px;padding:12px;margin-bottom:10px;background:#030a03}"
-    ".ct{font-size:10px;color:#0a8c0a;letter-spacing:.05em;margin-bottom:8px}"
-    ".row{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}"
-    ".lbl{font-size:11px;color:#0a8c0a}"
-    ".val{font-size:12px;color:#0f0}"
-    ".big{font-size:20px;font-weight:bold}"
-    ".btn{display:block;width:100%;padding:10px;background:#0f0;color:#000;font-family:'Courier New',monospace;"
-         "font-size:12px;font-weight:bold;border:none;border-radius:4px;cursor:pointer;text-align:center;margin-top:8px;box-sizing:border-box}"
-    ".btn.ol{background:transparent;color:#0f0;border:1px solid #0f0}"
-    ".btn.dn{background:transparent;color:#f05050;border:1px solid #f05050}"
-    ".btn.sm{padding:5px 10px;font-size:11px;width:auto;display:inline-block}"
-    "input,select,textarea{width:100%;padding:8px;background:#000;color:#0f0;border:1px solid #0a3a0a;"
-                          "border-radius:4px;font-family:'Courier New',monospace;font-size:12px;box-sizing:border-box;margin-top:4px}"
-    "textarea{resize:none;height:56px}"
-    ".bar{height:5px;background:#0a1a0a;border:1px solid #0a3a0a;border-radius:2px}"
-    ".bf{height:100%;background:#0f0;border-radius:2px}"
-    ".badge{font-size:10px;padding:1px 6px;border-radius:3px;border:1px solid}"
-    ".br{color:#f05050;border-color:#f05050}.bw{color:#a0d0ff;border-color:#a0d0ff}"
-    ".bb{color:#5080f0;border-color:#5080f0}.bg{color:#50d050;border-color:#50d050}"
-    ".hint{font-size:11px;opacity:.65;margin-top:3px}"
-    ".dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:#0f0;animation:pulse 2s infinite}"
-    ".dot.off{background:#333;animation:none}"
-    "@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}"
-    ".nr{display:flex;align-items:flex-start;justify-content:space-between;padding:8px 0;border-bottom:1px solid #041004}"
-    ".nr:last-child{border-bottom:none}"
-    ".mr{padding:7px 0;border-bottom:1px solid #041004}"
-    ".mr:last-child{border-bottom:none}"
-    ".mf{font-size:10px;color:#0a8c0a;margin-bottom:2px}"
-    ".mt{font-size:12px;color:#0f0}"
-    ".me{float:right;font-size:10px;color:#063006}"
-    ".grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:10px}"
-    ".mc{text-align:center;padding:8px}"
-    "</style></head><body>";
+// ─────────────────────────────────────────────
+//  PORTAL  (Phase 3)
+// ─────────────────────────────────────────────
+//
+//  One page, served once. Everything after that is JSON:
+//    GET  /api/state   — whole UI state, polled every 2 s
+//    POST /api/action  — every mutation, password-gated
+//    POST /api/setup    — first-run wizard (only while unconfigured)
+//
+//  The old portal regenerated ~20 KB of HTML inside a blocking request handler
+//  on every click. Now a request moves a few hundred bytes, so the handler is
+//  no longer a meaningful stall for the radio.
 
-  // ── Nav bar always visible ────────────────────────────────────────────────
-  if (myName == "" || myFaction == "NONE") {
-    // SETUP PAGE
-    html += "<div style='padding:16px'>"
-            "<h2>CYPHER32 // INITIALIZE</h2>"
-            "<div class='card'>"
-            "<div class='ct'>SELECT YOUR FACTION</div>"
-            "<form action='/setup' method='get'>"
-            "Faction:<br>"
-            "<select name='f' onchange='showDesc(this.value)'>"
-            "<option value='BLACK'>Black Hat  (+3 Brute Force)</option>"
-            "<option value='WHITE'>White Hat  (+3 Firewall)</option>"
-            "<option value='RED'>Red Hat    (+3 Stealth)</option>"
-            "<option value='GREEN'>Green Hat  (+1 each)</option>"
-            "</select>"
-            "<div class='hint' id='fd' style='margin:6px 0'></div>"
-            "Password (min 6 chars):<br>"
-            "<input type='password' name='p' id='pw1' minlength='6' required style='margin-bottom:6px'>"
-            "<br>Confirm password:<br>"
-            "<input type='password' id='pw2' minlength='6' required style='margin-bottom:6px'>"
-            "<div class='hint' id='pwe' style='color:#f66'></div>"
-            "<input type='submit' class='btn' value='ESTABLISH UPLINK' onclick=\""
-            "var a=document.getElementById(\'pw1\').value,"
-            "b=document.getElementById(\'pw2\').value;"
-            "if(a.length<6){document.getElementById(\'pwe\').textContent=\'Min 6 chars!\';return false;}"
-            "if(a!==b){document.getElementById(\'pwe\').textContent=\'Passwords do not match!\';return false;}"
-            "return true;\">"
-            "</form></div>"
-            "<script>"
-            "var d={'BLACK':'Offensive. Attacks anyone. +20% XP on success.',"
-            "'WHITE':'Defensive. Only attacks Black+Red. Earns XP when defenders fail.',"
-            "'RED':'Stealth specialist. +25% XP vs Green.',"
-            "'GREEN':'Balanced. +10% XP vs Black.'};"
-            "function showDesc(v){document.getElementById('fd').textContent=d[v]||'';}"
-            "showDesc('BLACK');"
-            "</script></div>";
-    html += "</body></html>";
-    server.send(200, "text/html", html);
+void handleRoot() {
+  server.sendHeader("Cache-Control", "no-store");
+  server.send_P(200, "text/html", PORTAL_HTML);
+}
+
+// Escape for embedding in a JSON string literal.
+String jesc(const String& s) {
+  String o; o.reserve(s.length() + 8);
+  for (size_t i = 0; i < s.length(); i++) {
+    char c = s.charAt(i);
+    if      (c == '"')  o += "\\\"";
+    else if (c == '\\') o += "\\\\";
+    else if (c < 0x20)  continue;
+    else                o += c;
+  }
+  return o;
+}
+
+String factionName(char f) {
+  if (f == 'B') return "BLACK";  if (f == 'W') return "WHITE";
+  if (f == 'R') return "RED";    if (f == 'G') return "GREEN";
+  return "?";
+}
+
+String buildStateJson() {
+  bool configured = !(myName == "" || myFaction == "NONE");
+
+  String j = "{";
+  j += "\"configured\":" + String(configured ? "true" : "false") + ",";
+  j += "\"name\":\""     + jesc(myName) + "\",";
+  j += "\"faction\":\""  + jesc(myFaction) + "\",";
+  j += "\"id\":\""       + chipIdStr(myChipID32) + "\",";
+  j += "\"version\":\""  + String(FIRMWARE_VERSION) + "\",";
+  j += "\"level\":"      + String(myLevel) + ",";
+  j += "\"xp\":"         + String(myXP) + ",";
+  j += "\"xpNext\":"     + String(xpForNextLevel()) + ",";
+  j += "\"sp\":"         + String(skillPoints) + ",";
+  j += "\"brute\":"      + String(skillBrute) + ",";
+  j += "\"stealth\":"    + String(skillStealth) + ",";
+  j += "\"firewall\":"   + String(skillFirewall) + ",";
+  j += "\"battery\":"    + String(getBatteryPercent()) + ",";
+
+  j += "\"lora\":{";
+  j += "\"status\":\""   + jesc(loraStatus) + "\",";
+  j += "\"ready\":"      + String(loraReady ? "true" : "false") + ",";
+  j += "\"rssi\":"       + String(loraLastRSSI) + ",";
+  j += "\"duty\":"       + String(dutyCyclePct(), 3);
+  j += "},";
+
+  j += "\"action\":{";
+  j += "\"state\":\""    + String(loraActionText()) + "\",";
+  j += "\"label\":\""    + jesc(loraActionLabel) + "\",";
+  j += "\"tries\":"      + String(loraActionTries) + ",";
+  j += "\"pending\":"    + String((loraActionPending() || hackInFlight) ? "true" : "false");
+  j += "},";
+
+  j += "\"nodes\":[";
+  for (int i = 0; i < knownCount; i++) {
+    KnownNode* n = &knownNodes[i];
+    String nid = chipIdStr(n->chip_id);
+    if (i) j += ",";
+    j += "{\"id\":\""       + nid + "\",";
+    j += "\"name\":\""      + jesc(nodeNameFromId(n->chip_id)) + "\",";
+    j += "\"level\":"       + String(n->level) + ",";
+    j += "\"faction\":\""   + String(n->faction) + "\",";
+    j += "\"avgRssi\":"     + String(nodeAvgRssi(n)) + ",";
+    j += "\"bars\":"        + String(nodeSignalBars(n)) + ",";
+    j += "\"proximity\":\"" + String(nodeProximity(n)) + "\",";
+    j += "\"status\":\""    + String(nodeStatusText(n)) + "\",";
+    j += "\"ageMs\":"       + String(ageMs(n->last_seen_ms)) + ",";
+    j += "\"recon\":"       + String(n->recon_count) + ",";
+    j += "\"hackWon\":"     + String(recentlyHacked(nid) ? "true" : "false") + ",";
+    j += "\"cooldownMs\":"  + String(hackCooldownLeft(nid)) + ",";
+    j += "\"unread\":"      + String(n->msg_unread ? "true" : "false") + ",";
+    j += "\"msg\":\""       + jesc(String(n->msg_inbox)) + "\"";
+    j += "}";
+  }
+  j += "]}";
+  return j;
+}
+
+void handleApiState() {
+  server.sendHeader("Cache-Control", "no-store");
+  server.send(200, "application/json", buildStateJson());
+}
+
+static void apiFail(int code, const String& msg) {
+  server.send(code, "application/json", "{\"err\":\"" + msg + "\"}");
+}
+static void apiOk(const String& msg) {
+  server.send(200, "application/json", "{\"instant\":true,\"msg\":\"" + msg + "\"}");
+}
+
+// First-run only. Refuses once a character exists, so nobody on the open Wi-Fi
+// can re-roll somebody else's device.
+void handleApiSetup() {
+  if (!(myName == "" || myFaction == "NONE")) { apiFail(409, "Already configured"); return; }
+  String f = server.arg("f"), p = server.arg("p");
+  if (f != "BLACK" && f != "WHITE" && f != "RED" && f != "GREEN") { apiFail(400, "Bad faction"); return; }
+  if (p.length() < 6) { apiFail(400, "Password too short"); return; }
+
+  myFaction  = f;
+  myPassword = p;
+  myName     = generateName();
+  if      (f == "BLACK") skillBrute    += 3;
+  else if (f == "WHITE") skillFirewall += 3;
+  else if (f == "RED")   skillStealth  += 3;
+  else { skillBrute++; skillStealth++; skillFirewall++; }
+  saveProgress();
+  server.send(200, "application/json", "{\"ok\":true}");
+  delay(200);
+  ESP.restart();
+}
+
+// Every mutation goes through here, and every one needs the password. The AP is
+// open by design, so without this anyone within radio range could spend your
+// skill points or wipe your character.
+void handleApiAction() {
+  if (myName == "" || myFaction == "NONE") { apiFail(409, "Not configured"); return; }
+  if (server.arg("pw") != myPassword)      { apiFail(401, "Wrong password");  return; }
+
+  String a = server.arg("a");
+
+  if (a == "beacon")     { loraSendBeacon(); apiOk("Beacon sent"); return; }
+  if (a == "clearnodes") { knownCount = 0; memset(knownNodes, 0, sizeof(knownNodes));
+                           apiOk("Node list cleared"); return; }
+  if (a == "reset")      { server.send(200, "application/json", "{\"instant\":true,\"msg\":\"Wiping\"}");
+                           preferences.begin("cypher-v8", false); preferences.clear(); preferences.end();
+                           delay(200); ESP.restart(); return; }
+  if (a == "setpw") {
+    String np = server.arg("np");
+    if (np.length() < 6) { apiFail(400, "Password too short"); return; }
+    myPassword = np; saveProgress(); apiOk("Password updated"); return;
+  }
+  if (a == "skill") {
+    if (skillPoints < 1) { apiFail(400, "No skill points"); return; }
+    String s = server.arg("s");
+    if      (s == "brute")    skillBrute++;
+    else if (s == "stealth")  skillStealth++;
+    else if (s == "firewall") skillFirewall++;
+    else { apiFail(400, "Unknown skill"); return; }
+    skillPoints--; saveProgress(); apiOk("Skill raised"); return;
+  }
+
+  // ── radio actions: fire and let the poll report the outcome (T3.5) ──
+  if (!loraReady) { apiFail(503, "Radio offline"); return; }
+  uint32_t target = (uint32_t)strtoul(server.arg("id").c_str(), nullptr, 16);
+  if (target == 0) { apiFail(400, "Bad target"); return; }
+  KnownNode* n = findNode(target);
+  if (!n) { apiFail(404, "Node not in range"); return; }
+
+  if (a == "recon") {
+    if (n->recon_count >= 3)  { apiFail(400, "Recon already complete"); return; }
+    if (loraActionPending())  { apiFail(429, "Another action in flight"); return; }
+    loraSendRecon(target);
+    server.send(200, "application/json", "{\"ok\":true}");
     return;
   }
-
-  // ── Tabbed main UI ────────────────────────────────────────────────────────
-  // Faction badge class
-  String fcls = "bb";
-  if (myFaction=="BLACK") fcls="bb";
-  else if (myFaction=="WHITE") fcls="bw";
-  else if (myFaction=="RED")   fcls="br";
-  else if (myFaction=="GREEN") fcls="bg";
-
-  html += "<div class='nav'>"
-          "<a class='tab a' href='#' onclick='show(\"hud\",this)'>HUD</a>"
-          "<a class='tab'   href='#' onclick='show(\"nodes\",this)'>Nodes</a>"
-          "<a class='tab'   href='#' onclick='show(\"skills\",this)'>Skills</a>"
-          "<a class='tab'   href='#' onclick='show(\"msgs\",this)'>Messages</a>"
-          "<a class='tab'   href='#' onclick='show(\"cfg\",this)'>Settings</a>"
-          "</div>";
-
-  // ── HUD PAGE ─────────────────────────────────────────────────────────────
-  html += "<div class='pg a' id='hud'>";
-
-  // Identity card
-  html += "<div class='card'>"
-          "<div style='display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px'>"
-          "<div><div style='font-size:20px;font-weight:bold'>" + myName + "</div>"
-          "<div style='margin-top:4px'><span class='badge " + fcls + "'>" + myFaction + "</span>"
-          " <span class='lbl'>ID: " + myUniqueID + "</span></div></div>"
-          "<div style='text-align:right'><div class='big'>" + String(myLevel) + "</div>"
-          "<div class='lbl'>LEVEL</div></div></div>";
-
-  // XP bar
-  int xpPct = constrain(myXP * 100 / xpForNextLevel(), 0, 100);
-  html += "<div class='lbl' style='margin-bottom:3px'>XP " + String(myXP) + " / " + String(xpForNextLevel()) + "</div>"
-          "<div class='bar'><div class='bf' style='width:" + String(xpPct) + "%'></div></div>"
-          "</div>";
-
-  // Stats grid
-  int hackCount = 0;
-  { String tmp = hackedList; while(tmp.indexOf(',')!=-1){hackCount++;tmp=tmp.substring(tmp.indexOf(',')+1);} }
-  html += "<div class='grid3'>"
-          "<div class='card mc'><div class='lbl'>Hacked</div><div class='big' style='font-size:18px'>" + String(hackCount) + "</div></div>"
-          "<div class='card mc'><div class='lbl'>Battery</div><div class='big' style='font-size:18px'>" + String(getBatteryPercent()) + "%</div></div>"
-          "<div class='card mc'><div class='lbl'>SP</div><div class='big' style='font-size:18px;" + (skillPoints>0?"color:#ff0":"") + "'>" + String(skillPoints) + (skillPoints>0?"!":"") + "</div></div>"
-          "</div>";
-
-  // Skills mini
-  auto sbar = [](String name, int v) {
-    int pct = v * 100 / 35;
-    return "<div class='row'><span class='lbl'>" + name + "</span><span class='val'>" + String(v) + "</span></div>"
-           "<div class='bar' style='margin-bottom:8px'><div class='bf' style='width:" + String(pct) + "%'></div></div>";
-  };
-  html += "<div class='card'><div class='ct'>SKILLS</div>"
-          + sbar("Brute Force", skillBrute)
-          + sbar("Stealth", skillStealth)
-          + sbar("Firewall", skillFirewall)
-          + "</div>";
-
-  // LoRa diagnostics card
-  String dotCls = loraReady ? "dot" : "dot off";
-  html += "<div class='card'><div class='ct'>LORA</div>"
-          "<div class='row'><span class='lbl'>Status</span>"
-          "<span class='val'><span class='" + dotCls + "'></span> " + loraStatus + "</span></div>";
-  if (!loraReady && loraInitError != 0)
-    html += "<div class='row'><span class='lbl'>Init error</span><span class='val' style='color:#f66'>" + String(loraInitError) + "</span></div>";
-  html += "<div class='row'><span class='lbl'>Signal</span><span class='val'>" + loraGetSignal() + "</span></div>"
-          "<div class='row'><span class='lbl'>Known nodes</span><span class='val'>" + String(knownCount) + "</span></div>"
-          "<div class='row'><span class='lbl'>Beacons sent</span><span class='val'>" + String(loraBeaconsSent) + "</span></div>"
-          "<div class='row'><span class='lbl'>Pkts TX / RX</span><span class='val'>" + String(loraPktSent) + " / " + String(loraPktRecv) + "</span></div>"
-          "<form action='/beacon' method='get'>"
-          "<button type='submit' class='btn ol' style='margin-top:6px'>Send beacon now</button>"
-          "</form></div>";
-
-  html += "</div>"; // end HUD
-
-  // ── NODES PAGE ────────────────────────────────────────────────────────────
-  html += "<div class='pg' id='nodes'>";
-
-  // Header bar: count + clear button
-  html += "<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:8px'>"
-          "<span class='lbl'>" + String(knownCount) + " node(s) via LoRa beacon</span>"
-          "<form action='/clearnodes' method='get'>"
-          "<button type='submit' class='btn ol sm' style='font-size:10px;padding:3px 8px'>Clear list</button>"
-          "</form></div>";
-
-  if (knownCount == 0) {
-    html += "<div class='card'><div class='lbl'>No nodes discovered yet.</div>"
-            "<div class='hint'>Nodes appear when other Cypher32 devices send a LoRa beacon. "
-            "Press &ldquo;Send beacon now&rdquo; on HUD to speed up discovery.</div></div>";
+  if (a == "hack") {
+    String nid = chipIdStr(target);
+    if (hackInFlight)         { apiFail(429, "A hack is already running"); return; }
+    if (recentlyHacked(nid))  { apiFail(400, "Already owned — locked for 7 days"); return; }
+    if (recentlyFailed(nid))  { apiFail(400, "Locked out — try again later"); return; }
+    if (loraActionPending())  { apiFail(429, "Another action in flight"); return; }
+    hackPendingId = nid;
+    loraHackStart(target, n->recon_count);
+    server.send(200, "application/json", "{\"ok\":true}");
+    return;
   }
-
-  for (int i = 0; i < knownCount; i++) {
-    KnownNode& nd = knownNodes[i];
-    String nid  = chipIdStr(nd.chip_id);
-    String name = nodeNameFromId(nd.chip_id);
-    bool locked = recentlyHacked(nid);
-    bool hackDone = nd.hack_attempted;
-
-    // Faction badge
-    String fBadge = "";
-    char fc = nd.faction;
-    if      (fc=='B') fBadge="<span class='badge bb'>BLACK</span>";
-    else if (fc=='W') fBadge="<span class='badge bw'>WHITE</span>";
-    else if (fc=='R') fBadge="<span class='badge br'>RED</span>";
-    else if (fc=='G') fBadge="<span class='badge bg'>GREEN</span>";
-    else              fBadge="<span class='badge' style='color:#0a3a0a;border-color:#0a3a0a'>UNKNOWN</span>";
-
-    // Last seen
-    unsigned long ago = nd.last_seen_ms ? (millis()-nd.last_seen_ms)/1000UL : 9999;
-    String seenStr = ago<60 ? String(ago)+"s ago" : ago<3600 ? String(ago/60)+"m ago" : "1h+ ago";
-
-    // Card style
-    String cardStyle = locked
-      ? "border:1px solid #1a0a0a;border-radius:5px;padding:12px;margin-bottom:10px;background:#0a0303;"
-      : "border:1px solid #0a3a0a;border-radius:5px;padding:12px;margin-bottom:10px;background:#030a03;";
-
-    html += "<div style='" + cardStyle + "'>";
-
-    // Header: name + faction + status chip
-    html += "<div style='display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px'>"
-            "<div><div style='font-size:15px;font-weight:bold;color:" + String(locked?"#0a3a0a":"#0f0") + "'>"
-            + name + "</div>"
-            "<div style='font-size:11px;color:#0a8c0a;margin-top:2px'>ID: " + nid + " &middot; LVL " + String(nd.level)
-            + " &middot; " + seenStr + "</div></div>"
-            "<div>" + fBadge + "</div></div>";
-
-    if (locked) {
-      // Show cooldown
-      int idx = hackedList.indexOf(nid + ":");
-      String coolStr = "7d 0h";
-      if (idx != -1) {
-        int col = idx+nid.length()+1;
-        int com = hackedList.indexOf(",",col);
-        if (com!=-1) {
-          unsigned long hackT=(unsigned long)hackedList.substring(col,com).toInt();
-          unsigned long elapsed=nowMs()-hackT;
-          if (elapsed<WEEK_MS) {
-            unsigned long msLeft=WEEK_MS-elapsed;
-            int hLeft=(int)(msLeft/3600000UL);
-            coolStr=String(hLeft/24)+"d "+String(hLeft%24)+"h";
-          }
-        }
-      }
-      html += "<div style='font-size:11px;color:#3a1a0a;margin-top:4px'>"
-              "Locked &mdash; re-hackable in " + coolStr + "</div>";
-    } else {
-      // Show recon results if any
-      if (nd.recon_count > 0) {
-        html += "<div style='background:#041a04;border:1px solid #0a3a0a;border-radius:4px;"
-                "padding:7px;margin:7px 0;font-size:11px'>"
-                "<div style='color:#0a8c0a;margin-bottom:4px'>RECON INTEL</div>";
-        for (int r=0; r<nd.recon_count; r++) {
-          html += "<div>" + statTypeName(nd.recon_types[r])
-                + ": <span style='color:#0f0;font-weight:bold'>" + String(nd.recon_values[r]) + "</span></div>";
-        }
-        if (nd.recon_count < 3)
-          html += "<div style='color:#063006;margin-top:3px'>" + String(3-nd.recon_count) + " recon attempt(s) remaining</div>";
-        else
-          html += "<div style='color:#063006;margin-top:3px'>All stats revealed</div>";
-        html += "</div>";
-      }
-
-      // Hack result + 12h cooldown
-      bool hackOnCooldown = hackDone && nd.hack_time_ms > 0 &&
-                            (millis() - nd.hack_time_ms < HALF_DAY_MS);
-      bool hackCanRetry   = hackDone && !hackOnCooldown && !nd.hack_won;
-      if (hackCanRetry) { nd.hack_attempted = false; nd.hack_won = false; }
-
-      if (hackDone && !hackCanRetry) {
-        if (nd.hack_won) {
-          html += "<div style='background:#041a04;border:1px solid #0f0;border-radius:4px;"
-                  "padding:7px;font-size:11px;color:#0f0;margin-bottom:7px'>"
-                  "HACK SUCCEEDED &mdash; node owned.</div>";
-        } else if (hackOnCooldown) {
-          unsigned long msLeft = HALF_DAY_MS - (millis() - nd.hack_time_ms);
-          int hLeft = (int)(msLeft / 3600000UL);
-          int mLeft = (int)((msLeft % 3600000UL) / 60000UL);
-          html += "<div style='background:#1a0404;border:1px solid #f05050;border-radius:4px;"
-                  "padding:7px;font-size:11px;color:#f05050;margin-bottom:7px'>"
-                  "HACK FAILED &mdash; retry in " + String(hLeft) + "h " + String(mLeft) + "m</div>";
-        }
-      }
-
-      // Action buttons
-      html += "<div style='display:flex;gap:6px;margin-top:6px'>";
-
-      if (nd.recon_count < 2) {
-        String statOptions = "";
-        bool hasB=false, hasS=false, hasFW=false;
-        for(int r=0;r<nd.recon_count;r++){
-          if(nd.recon_types[r]==STAT_BRUTE)    hasB=true;
-          if(nd.recon_types[r]==STAT_STEALTH)  hasS=true;
-          if(nd.recon_types[r]==STAT_FIREWALL) hasFW=true;
-        }
-        html += "<form action='/recon' method='get' style='display:flex;gap:4px;flex-wrap:wrap'>"
-                "<input type='hidden' name='id' value='" + nid + "'>"
-                "<select name='stat' class='btn ol sm' style='padding:5px;font-size:11px;width:auto'>";
-        if(!hasB)  html += "<option value='1'>Brute Force</option>";
-        if(!hasS)  html += "<option value='2'>Stealth</option>";
-        if(!hasFW) html += "<option value='3'>Firewall</option>";
-        html += "</select>"
-                "<button type='submit' class='btn ol sm'>Recon (" + String(2-nd.recon_count) + " left)</button>"
-                "</form>";
-      } else {
-        html += "<button class='btn ol sm' disabled style='opacity:.4'>Recon (done)</button>";
-      }
-
-      bool canHack = !hackDone || hackCanRetry;
-      if (canHack) {
-        html += "<form action='/hack' method='get'>"
-                "<input type='hidden' name='id' value='" + nid + "'>"
-                "<button type='submit' class='btn sm' "
-                "onclick='return confirm(\"One attempt only. Sure?\")'>"
-                "Hack (1 attempt)</button></form>";
-      } else {
-        String lockLbl = nd.hack_won ? "Owned" : "Cooldown";
-        html += "<button class='btn sm' disabled style='opacity:.4'>" + lockLbl + "</button>";
-      }
-      html += "</div>";
-    }
-    html += "</div>"; // end node card
+  if (a == "msg") {
+    String txt = server.arg("txt");
+    if (txt.length() == 0)   { apiFail(400, "Empty message"); return; }
+    if (loraActionPending()) { apiFail(429, "Another action in flight"); return; }
+    strncpy(n->msg_sent, txt.c_str(), 32); n->msg_sent[32] = '\0';
+    loraSendMsg(target, txt.c_str());
+    server.send(200, "application/json", "{\"ok\":true}");
+    return;
   }
-  html += "</div>"; // end nodes page
-
-  // ── SKILLS PAGE ───────────────────────────────────────────────────────────
-  html += "<div class='pg' id='skills'>";
-
-  if (skillPoints > 0) {
-    html += "<div class='card' style='text-align:center;padding:16px'>"
-            "<div class='lbl'>Skill points available</div>"
-            "<div style='font-size:32px;font-weight:bold;color:#ff0;margin:8px 0'>" + String(skillPoints) + "</div>"
-            "<div class='lbl'>Spend wisely &mdash; max level is 32</div>"
-            "</div>";
-
-    struct { const char* name; const char* key; const char* desc; int val; } skills[3] = {
-      {"Brute Force", "br", "Shrinks hack pool — easier to crack codes", skillBrute},
-      {"Stealth",     "st", "+1 attempt per point — more guesses per hack", skillStealth},
-      {"Firewall",    "fi", "Reduces XP loss when counter-hacked",   skillFirewall},
-    };
-    for (int i = 0; i < 3; i++) {
-      int pct = skills[i].val * 100 / 35;
-      html += "<div class='card'>"
-              "<div style='display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px'>"
-              "<span style='font-size:13px;font-weight:bold'>" + String(skills[i].name) + "</span>"
-              "<span class='lbl'>" + String(skills[i].val) + " / 35</span></div>"
-              "<div class='bar' style='margin-bottom:8px'><div class='bf' style='width:" + String(pct) + "%'></div></div>"
-              "<div class='hint' style='margin-bottom:8px'>" + String(skills[i].desc) + "</div>"
-              "<form action='/add' method='get'>"
-              "<input type='hidden' name='s' value='" + String(skills[i].key) + "'>"
-              "<button type='submit' class='btn" + String(i==0?" ":" ol") + "'>+ Upgrade " + String(skills[i].name) + "</button>"
-              "</form></div>";
-    }
-  } else if (myLevel >= MAX_LEVEL) {
-    html += "<div class='card' style='text-align:center'><div class='big' style='font-size:16px'>MAX LEVEL</div>"
-            "<div class='hint' style='margin-top:6px'>LVL 32 reached. Respect.</div></div>";
-  } else {
-    // Show skills read-only when no SP available
-    struct { const char* n; int v; const char* d; } sk[3] = {
-      {"Brute Force", skillBrute,    "Shrinks hack pool"},
-      {"Stealth",     skillStealth,  "+1 attempt per point"},
-      {"Firewall",    skillFirewall, "Reduces XP loss"},
-    };
-    for (int i=0;i<3;i++) {
-      int pct = sk[i].v * 100 / 35;
-      html += "<div class='card'>"
-              "<div style='display:flex;justify-content:space-between;margin-bottom:4px'>"
-              "<span style='font-size:13px;font-weight:bold'>" + String(sk[i].n) + "</span>"
-              "<span class='lbl'>" + String(sk[i].v) + " / 35</span></div>"
-              "<div class='bar' style='margin-bottom:5px'><div class='bf' style='width:" + String(pct) + "%'></div></div>"
-              "<div class='hint'>" + String(sk[i].d) + "</div>"
-              "<button class='btn ol' disabled style='margin-top:8px;opacity:.35'>No SP available</button>"
-              "</div>";
-    }
-  }
-  html += "</div>"; // end skills
-
-  // ── MESSAGES PAGE ─────────────────────────────────────────────────────────
-  html += "<div class='pg' id='msgs'>";
-
-  // Send form
-  html += "<div class='card'><div class='ct'>SEND MESSAGE</div>"
-          "<form action='/msg' method='get'>"
-          "To:<br><select name='id'>";
-  if (knownCount == 0) html += "<option value=''>No nodes known yet</option>";
-  for (int i = 0; i < knownCount; i++) {
-    String nn = nodeNameFromId(knownNodes[i].chip_id);
-    String ni = chipIdStr(knownNodes[i].chip_id);
-    html += "<option value='" + ni + "'>" + nn + " — LVL " + String(knownNodes[i].level) + "</option>";
-  }
-  html += "</select>"
-          "Message <span class='hint'>(max 32 chars)</span>:<br>"
-          "<textarea name='txt' maxlength='32' id='mt' onkeyup='document.getElementById(&quot;mc&quot;).textContent=this.value.length+&quot;/32&quot;'></textarea>"
-          "<div style='display:flex;justify-content:space-between;align-items:center;margin-top:4px'>"
-          "<span class='lbl' id='mc'>0/32</span>"
-          "<button type='submit' class='btn ol sm'" + String(knownCount==0?" disabled":"") + ">Send via LoRa</button>"
-          "</div></form></div>";
-
-  // Sent messages
-  html += "<div class='card'><div class='ct'>SENT</div>";
-  bool hasSent = false;
-  for (int i = 0; i < knownCount; i++) if (knownNodes[i].msg_sent[0]) hasSent = true;
-  if (!hasSent) {
-    html += "<div class='lbl'>No messages sent yet.</div>";
-  } else {
-    for (int i = 0; i < knownCount; i++) {
-      if (!knownNodes[i].msg_sent[0]) continue;
-      String rName = nodeNameFromId(knownNodes[i].chip_id);
-      html += "<div class='mr'>"
-              "<div class='mf' style='color:#0a8c0a'>To: " + rName + "</div>"
-              "<div class='mt'>" + String(knownNodes[i].msg_sent) + "</div>"
-              "</div>";
-    }
-  }
-  html += "</div>";
-
-  // Inbox
-  bool hasMessages = false;
-  for (int i = 0; i < knownCount; i++) if (knownNodes[i].msg_inbox[0]) hasMessages = true;
-
-  html += "<div class='card'><div class='ct'>INBOX</div>";
-  if (!hasMessages) {
-    html += "<div class='lbl'>No messages received yet.</div>";
-  } else {
-    for (int i = 0; i < knownCount; i++) {
-      if (!knownNodes[i].msg_inbox[0]) continue;
-      String nid = chipIdStr(knownNodes[i].chip_id);
-      String senderName = nodeNameFromId(knownNodes[i].chip_id);
-      html += "<div class='mr'>"
-              "<div class='mf'>" + senderName + " (" + nid + ")</div>"
-              "<div class='mt'>" + String(knownNodes[i].msg_inbox) + "</div>"
-              "</div>";
-    }
-  }
-  html += "</div></div>"; // end msgs
-
-  // ── SETTINGS PAGE ─────────────────────────────────────────────────────────
-  html += "<div class='pg' id='cfg'>";
-  html += "<div class='card'><div class='ct'>DEVICE</div>"
-          "<div class='row'><span class='lbl'>Codename</span><span class='val'>" + myName + "</span></div>"
-          "<div class='row'><span class='lbl'>Chip ID</span><span class='val'>" + myUniqueID + "</span></div>"
-          "<div class='row'><span class='lbl'>Faction</span><span class='val'><span class='badge " + fcls + "'>" + myFaction + "</span></span></div>"
-          "</div>"
-          "<div class='card'><div class='ct'>CHANGE PASSWORD</div>"
-          "<form action='/setpw' method='get'>"
-          "<input type='password' name='p' id='np1' minlength='6' placeholder='New password (min 6)' style='margin-bottom:6px'>"
-          "<br><input type='password' id='np2' minlength='6' placeholder='Confirm password' style='margin-bottom:6px'>"
-          "<div class='hint' id='pwe2' style='color:#f66'></div>"
-          "<button type='submit' class='btn ol' onclick=\"var a=document.getElementById(\'np1\').value,"
-          "b=document.getElementById(\'np2\').value;"
-          "if(a.length<6){document.getElementById(\'pwe2\').textContent=\'Min 6 chars!\';return false;}"
-          "if(a!==b){document.getElementById(\'pwe2\').textContent=\'Passwords do not match!\';return false;}"
-          "return true;\">"
-          "Update password</button></form></div>";
-
-  html += "<div class='card'><div class='ct'>CHANGE PASSWORD</div>"
-          "<form action='/setpw' method='get'>"
-          "New password:<br><input type='password' id='p1' name='p' minlength='6'>"
-          "<br>Confirm:<br><input type='password' id='p2' minlength='6'>"
-          "<div class='hint' id='pwm' style='color:#f66'></div>"
-          "<button type='submit' class='btn ol' onclick=\""
-          "var a=document.getElementById(\'p1\').value,b=document.getElementById(\'p2\').value;"
-          "if(a!==b){document.getElementById(\'pwm\').textContent=\'Passwords do not match!\';event.preventDefault();}"
-          "else if(a.length<8){document.getElementById(\'pwm\').textContent=\'Min 6 chars!\';event.preventDefault();}"
-          "\">Update password</button></form></div>";
-
-  html += "<div class='card'><div class='ct'>LORA</div>"
-          "<div class='row'><span class='lbl'>Status</span><span class='val'><span class='" + dotCls + "'></span> " + loraStatus + "</span></div>"
-          "<div class='row'><span class='lbl'>Signal</span><span class='val'>" + loraGetSignal() + "</span></div>"
-          "<div class='row'><span class='lbl'>Frequency</span><span class='val'>868 MHz</span></div>"
-          "<div class='row'><span class='lbl'>Spreading</span><span class='val'>SF9</span></div>"
-          "</div>";
-
-  html += "<div class='card'>"
-          "<div class='ct'>DANGER ZONE</div>"
-          "<form action='/reset' method='get' onsubmit='return confirm(\"Wipe all progress?\")'>"
-          "<button type='submit' class='btn dn'>Factory reset — wipe all data</button>"
-          "</form></div>";
-  html += "</div>"; // end settings
-
-  // ── Tab switching JS ──────────────────────────────────────────────────────
-  html += "<script>"
-          "function show(id,el){"
-          "document.querySelectorAll('.pg').forEach(function(p){p.classList.remove('a')});"
-          "document.querySelectorAll('.tab').forEach(function(t){t.classList.remove('a')});"
-          "document.getElementById(id).classList.add('a');"
-          "if(el)el.classList.add('a');"
-          "return false;}"
-          "</script>";
-
-  html += "</body></html>";
-  server.send(200, "text/html", html);
-}
-
-
-void handleSetup() {
-  // Guard: ignore if already configured (prevents rename via direct URL)
-  if (myName != "" && myFaction != "NONE") {
-    server.sendHeader("Location", "/"); server.send(303); return;
-  }
-  if (server.hasArg("f") && server.hasArg("p") && server.arg("p").length() >= 6) {
-    myName     = generateName();
-    myFaction  = server.arg("f");
-    myPassword = server.arg("p");
-    if      (myFaction == "BLACK") { skillBrute    = 3; }
-    else if (myFaction == "WHITE") { skillFirewall = 3; }
-    else if (myFaction == "RED")   { skillStealth  = 3; }
-    else if (myFaction == "GREEN") { skillBrute = 1; skillStealth = 1; skillFirewall = 1; }
-    saveProgress(); ESP.restart();
-  }
-  server.sendHeader("Location", "/"); server.send(303);
-}
-
-void handleAddSkill() {
-  if (skillPoints > 0) {
-    String s = server.arg("s");
-    if      (s == "st") skillStealth++;
-    else if (s == "br") skillBrute++;
-    else if (s == "fi") skillFirewall++;
-    skillPoints--; saveProgress();
-  }
-  server.sendHeader("Location", "/#skills"); server.send(303);
-}
-
-void handleReset() {
-  preferences.begin("cypher-v8", false); preferences.clear(); preferences.end(); ESP.restart();
-}
-
-// Manual beacon — fires immediately from web UI
-void handleBeacon() {
-  loraSendBeacon();
-  server.sendHeader("Location", "/#hud"); server.send(303);
+  apiFail(400, "Unknown action");
 }
 
 // T0.3 — machine-readable diagnostics.  curl 192.168.4.1/api/diag
 void handleApiDiag() {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
+  server.sendHeader("Cache-Control", "no-store");
   server.send(200, "application/json", loraDiagJson());
 }
 
-// T3.7 groundwork — reliable no-op probe against one node.
+// T3.7 — reliable no-op probe, reports round-trip time.
 void handleApiPing() {
-  if (!server.hasArg("id")) { server.send(400, "application/json", "{\"error\":\"id required\"}"); return; }
+  if (!server.hasArg("id")) { apiFail(400, "id required"); return; }
   uint32_t target = (uint32_t)strtoul(server.arg("id").c_str(), nullptr, 16);
+  if (!loraReady || target == 0) { apiFail(503, "Radio offline"); return; }
   unsigned long t0 = millis();
   loraSendPing(target);
-  // Pump until ACK or the reliable layer gives up (4 tries ≈ 2.8 s worst case).
   while (loraActionPending() && (uint32_t)(millis() - t0) < 3500) {
     loraTick(); delay(5); yield();
   }
@@ -1666,70 +1380,17 @@ void handleApiPing() {
              ",\"rttMs\":" + String((uint32_t)(millis() - t0)) +
              ",\"tries\":" + String(loraActionTries) +
              ",\"rssi\":"  + String(loraLastRSSI) + "}";
-  server.sendHeader("Access-Control-Allow-Origin", "*");
   server.send(200, "application/json", j);
 }
 
-// Clear all known nodes from RAM (no flash wipe — they repopulate from beacons)
-void handleClearNodes() {
-  knownCount = 0;
-  memset(knownNodes, 0, sizeof(knownNodes));
-  server.sendHeader("Location", "/#nodes"); server.send(303);
-}
-
-// Change password handler
-void handleSetPw() {
-  if (server.hasArg("p")) {
-    String pw = server.arg("p");
-    if (pw.length() >= 6) {
-      myPassword = pw;
-      saveProgress();
-    }
-  }
-  server.sendHeader("Location", "/#cfg"); server.send(303);
-}
-
-// Recon — send LoRa recon request; cap at 3 per node
-void handleRecon() {
-  if (!server.hasArg("id")) { server.sendHeader("Location","/#nodes"); server.send(303); return; }
-  String hexId = server.arg("id");
-  uint32_t target = (uint32_t)strtoul(hexId.c_str(), nullptr, 16);
-  KnownNode* n = findOrAddNode(target);
-  if (n && n->recon_count < 3 && loraReady) {
-    int prevCount = n->recon_count;
-    loraSendRecon(target);
-
-    // Bounded pump, not a blocking wait. With deferred replies (60–120 ms) and
-    // the ACK layer, a round trip lands in ~250 ms; 1.5 s covers the first
-    // retry too. The old code waited 5 s with no retry underneath it, so it
-    // usually just timed out slowly.
-    // Goes away entirely at T3.2/T3.5 when the portal polls /api/state.
-    unsigned long t0 = millis();
-    while ((uint32_t)(millis() - t0) < 1500 && n->recon_count == prevCount) {
-      loraTick();
-      delay(5);
-      yield();
-    }
-  }
-  server.sendHeader("Location", "/#nodes"); server.send(303);
-}
-
-// Hack — one attempt. The DEFENDER rolls and returns the verdict (T4.3), so
-// this only fires the request; loop() applies the outcome when it arrives.
-void handleHack() {
-  if (!server.hasArg("id")) { server.sendHeader("Location","/#nodes"); server.send(303); return; }
-  String   hexId  = server.arg("id");
-  uint32_t target = (uint32_t)strtoul(hexId.c_str(), nullptr, 16);
-
-  KnownNode* n = findNode(target);
-  bool blocked = (!n) || (!loraReady) || hackInFlight ||
-                 recentlyHacked(hexId) || recentlyFailed(hexId);
-
-  if (!blocked) {
-    hackPendingId = hexId;
-    loraHackStart(target, n->recon_count);
-  }
-  server.sendHeader("Location", "/#nodes"); server.send(303);
+// ── Captive portal (T3.1) ────────────────────
+//
+//  Joining a Wi-Fi network with no internet makes phones quietly fall back to
+//  cellular, and then "the website doesn't load". Answering the OS probe URLs
+//  with a redirect is what makes the portal open by itself.
+void handleCaptive() {
+  server.sendHeader("Location", "http://192.168.4.1/", true);
+  server.send(302, "text/plain", "");
 }
 
 // Apply a verdict the defender sent us. Called from loop(), never from a
@@ -1782,28 +1443,6 @@ void resolveHackVerdict() {
   saveProgress();
   if (lvlUp) { displayLevelUp(); revertIdleAtMs = millis() + 6000; }
   else                            revertIdleAtMs = millis() + 4000;
-}
-
-// Send message handler
-void handleMsg() {
-  if (!server.hasArg("id") || !server.hasArg("txt")) {
-    server.sendHeader("Location", "/#msgs"); server.send(303); return;
-  }
-  String hexId = server.arg("id");
-  String txt   = server.arg("txt");
-  if (txt.length() == 0) {
-    server.sendHeader("Location", "/#msgs"); server.send(303); return;
-  }
-  uint32_t target = (uint32_t)strtoul(hexId.c_str(), nullptr, 16);
-  // Store in outbox regardless of LoRa status
-  KnownNode* n = findOrAddNode(target);
-  if (n) {
-    strncpy(n->msg_sent, txt.c_str(), 32);
-    n->msg_sent[32] = '\0';
-  }
-  // Send over LoRa if available
-  if (loraReady) loraSendMsg(target, txt.c_str());
-  server.sendHeader("Location", "/#msgs"); server.send(303);
 }
 
 // ─────────────────────────────────────────────
@@ -1879,19 +1518,31 @@ void setup() {
   WiFi.mode(WIFI_AP_STA);
   updateBeacon(false);
 
-  server.on("/",         handleRoot);
-  server.on("/setup",    handleSetup);
-  server.on("/add",      handleAddSkill);
-  server.on("/reset",    handleReset);
-  server.on("/recon",    handleRecon);
-  server.on("/hack",     handleHack);
-  server.on("/msg",      handleMsg);
-  server.on("/setpw",    handleSetPw);
-  server.on("/beacon",   handleBeacon);
-  server.on("/clearnodes",handleClearNodes);
-  server.on("/api/diag", handleApiDiag);
-  server.on("/api/ping", handleApiPing);
+  server.on("/",            handleRoot);
+  server.on("/api/state",   HTTP_GET,  handleApiState);
+  server.on("/api/action",  HTTP_POST, handleApiAction);
+  server.on("/api/setup",   HTTP_POST, handleApiSetup);
+  server.on("/api/diag",    HTTP_GET,  handleApiDiag);
+  server.on("/api/ping",    HTTP_GET,  handleApiPing);
+
+  // The probe URLs each OS uses to decide whether a network has internet.
+  // Answering with a redirect is what makes the portal pop up on its own.
+  server.on("/generate_204",         handleCaptive);  // Android
+  server.on("/gen_204",              handleCaptive);
+  server.on("/hotspot-detect.html",  handleCaptive);  // iOS / macOS
+  server.on("/library/test/success.html", handleCaptive);
+  server.on("/ncsi.txt",             handleCaptive);  // Windows
+  server.on("/connecttest.txt",      handleCaptive);
+  server.on("/fwlink",               handleCaptive);
+  server.on("/canonical.html",       handleCaptive);
+  server.onNotFound(handleCaptive);
   server.begin();
+
+  // Wildcard DNS: every lookup resolves to us, so any URL the phone tries
+  // lands on the portal (T3.1).
+  dnsServer.setErrorReplyCode(DNSReplyCode::NoError);
+  dnsServer.start(53, "*", IPAddress(192, 168, 4, 1));
+  if (MDNS.begin("cypher32")) MDNS.addService("http", "tcp", 80);
 
   // First beacon immediately; loraTick() follows up at ~3 s and ~8 s, then
   // settles into the adaptive cadence (T1.7 / T2.4).
@@ -1910,6 +1561,7 @@ void setup() {
 // ─────────────────────────────────────────────
 
 void loop() {
+  dnsServer.processNextRequest();
   server.handleClient();
   loraTick();
 
@@ -1919,6 +1571,7 @@ void loop() {
   // radio deaf for five seconds every time a message arrived.
   if (revertIdleAtMs && (int32_t)(millis() - revertIdleAtMs) >= 0) {
     revertIdleAtMs = 0;
+    lastIdleSig = 0xFFFFFFFF;   // panel is showing an event screen — force redraw
     displayIdle();
   }
 
@@ -1965,13 +1618,13 @@ void loop() {
   // Beaconing is scheduled inside loraTick() now (T1.7 boot burst + T2.4
   // adaptive cadence), so there is nothing to do here.
 
-  // Mood drift + display refresh every 10 minutes
-  // Long interval so display.update() (~2s) rarely blocks the loop
+  // Mood drift every 10 minutes. Only actually redraw if the visible state
+  // changed — a full e-ink refresh costs ~2 s and a flash (T4.6).
   static unsigned long lastMood = 0;
-  if (millis() - lastMood > 600000UL) {
+  if ((uint32_t)(millis() - lastMood) > 600000UL) {
     lastMood = millis();
     driftMood();
-    displayIdle();
+    if (idleNeedsRefresh()) displayIdle();
   }
 
   // Prune stale hack records

@@ -1,13 +1,18 @@
 #pragma once
 #include <Arduino.h>
 
+// T4.7 — the single source of truth for the version. Shown in the portal
+// Config tab and in /api/diag.
+#define FIRMWARE_VERSION "v60"
+
 // ─────────────────────────────────────────────
-//  CYPHER32 LORA PACKET PROTOCOL  — v54
+//  CYPHER32 LORA PACKET PROTOCOL  — v60
 // ─────────────────────────────────────────────
 //
-//  v54 adds a link layer on top of the raw driver:
+//  Link layer on top of the raw driver:
 //    - per-sender sequence numbers (duplicate suppression)
 //    - flags byte carrying ACK_REQUESTED / IS_ACK
+//    - 4-byte truncated HMAC-SHA256 tag appended to every frame (T4.1)
 //
 //  No GPS, no RSSI-position, no names on the wire.
 //  Only chip-IDs and game stats are transmitted.
@@ -20,8 +25,8 @@
 //    [4]  to_id    — recipient chip-ID (uint32, 0=broadcast)
 //    [N]  payload  — type-specific data
 //
-//  Header is 11 bytes. Largest packet (PktMsg) is 44 bytes, well under the
-//  64-byte cap enforced by loraSend().
+//  Header is 11 bytes. Largest packet (PktMsg) is 44 bytes, plus the 4-byte
+//  signature, well under the 64-byte cap enforced by enqueueTx().
 
 // ── Packet type bytes ────────────────────────
 #define PKT_BEACON      0x01  // broadcast: "I exist"
@@ -47,9 +52,14 @@
 #define HACK_WIN  0x01
 #define HACK_LOSE 0x00
 
-// ── Shared network key (reserved for T4.1 HMAC signing) ───
-//  Not yet used. Change this to your own secret before deploying.
-//  All devices must use the same key.
+// ── Shared network key — HMAC frame signing (T4.1) ───
+//  CHANGE THIS to your own random 16 bytes before deploying. Every device in
+//  your game must use the same key; devices with different keys will reject
+//  each other's frames entirely.
+//
+//  This is not real security. The key is compiled into every device, so anyone
+//  who dumps flash can extract it. It exists to stop a player with a spare
+//  SX1262 injecting packets to award themselves XP.
 static const uint8_t LORA_KEY[16] = {
   0xC3, 0x29, 0xF1, 0x7A, 0x04, 0xBE, 0x58, 0x3D,
   0x91, 0xE6, 0x2C, 0x47, 0xD0, 0x8B, 0xA5, 0x6F
