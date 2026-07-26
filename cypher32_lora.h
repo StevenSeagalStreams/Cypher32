@@ -1,4 +1,5 @@
 #pragma once
+#include <math.h>
 #include <RadioLib.h>
 #include "cypher32_packets.h"
 
@@ -45,10 +46,21 @@
 #define RX_WATCHDOG_MS      10000  // re-arm cadence (T1.6)
 #define RX_WATCHDOG_STRIKES 3      // failures before full re-init
 
-// Beacon cadence (T1.7) — used by the sketch's loop().
-// For the T0.4 bench test, drop these to 5000 / 5000.
-#define LORA_BEACON_MIN_MS  25000
-#define LORA_BEACON_MAX_MS  35000
+// Beacon cadence (T1.7 / T2.4). Steady state is 25–35 s; a device speeds up to
+// 12–18 s for the first few minutes after boot and whenever a new neighbour
+// appears, so joining a group is fast without raising average airtime.
+// For the T0.4 bench test, drop the steady pair to 5000 / 5000.
+#define LORA_BEACON_MIN_MS       25000
+#define LORA_BEACON_MAX_MS       35000
+#define LORA_BEACON_FAST_MIN_MS  12000
+#define LORA_BEACON_FAST_MAX_MS  18000
+#define BEACON_FAST_WINDOW_MS   180000   // how long "fast" lasts (3 min)
+
+// EU 868 g1 duty cycle (T2.5). Legal limit is 1%; we soft-cap below it and
+// defer deferrable traffic above the cap so a retry storm cannot push us over.
+#define DUTY_BUCKETS         60          // one bucket per minute, rolling hour
+#define DUTY_LIMIT_PCT       0.8f
+#define NODE_PRUNE_MS        10000UL     // how often to age out nodes (T2.3)
 
 SPIClass loraSPI(FSPI);
 // The Module constructor only stores pin numbers — no SPI access happens until
@@ -91,6 +103,15 @@ int       loraCadBusy         = 0;   // T1.5
 int       loraTxQueueDrops    = 0;
 int       loraWatchdogFires   = 0;   // T1.6
 int       loraReinits         = 0;
+int       loraNodesEvicted    = 0;   // T2.3
+int       loraDutyDeferred    = 0;   // T2.5
+
+// Beacon scheduling lives here rather than in the sketch's loop() so the
+// adaptive logic (T2.4) sits next to the radio it governs.
+bool      loraBeaconEnabled   = false;   // sketch sets this once configured
+uint32_t  loraNextBeaconMs    = 0;
+uint32_t  loraFastUntilMs     = 0;
+uint8_t   loraBootBurst       = 0;
 
 String    pendingMsg     = "";
 String    pendingMsgFrom = "";
@@ -178,6 +199,93 @@ String chipIdStr(uint32_t id) {
   return String(buf);
 }
 
+// Record presence and per-node signal for a peer we just heard from
+// (T2.1 — fixes D7). Every RX path funnels through here so no packet type can
+// forget to update the node's freshness.
+KnownNode* touchNode(uint32_t chip_id) {
+  bool isNew = (findNode(chip_id) == nullptr);
+  KnownNode* n = findOrAddNode(chip_id);
+  if (!n) return nullptr;
+  if (isNew || n->first_seen_ms == 0) {
+    n->first_seen_ms = millis();
+    // A new neighbour appearing is exactly when discovery should speed up.
+    loraFastUntilMs  = millis() + BEACON_FAST_WINDOW_MS;
+  }
+  n->last_seen_ms = millis();
+  n->rssi  = (int16_t)loraLastRSSI;
+  n->snr10 = (int16_t)(loraLastSNR * 10.0f);
+  n->rssi_hist[n->rssi_idx] = n->rssi;
+  n->rssi_idx = (uint8_t)((n->rssi_idx + 1) % RSSI_HIST);
+  if (n->rssi_n < RSSI_HIST) n->rssi_n++;
+  return n;
+}
+
+// Age out nodes nobody has heard from (T2.3 — fixes D8).
+//
+// NOTE: eviction drops the node's 12 h hack retry cooldown along with it. The
+// 7-day win lock is safe because it lives in the sketch's persisted hackedList,
+// but the retry cooldown is per-node RAM. T4.4 persists it to NVS keyed by chip
+// ID so walking out of range cannot be used to clear a failed-hack cooldown.
+void pruneNodes() {
+  for (int i = 0; i < knownCount; ) {
+    if (nodeIsExpired(&knownNodes[i])) {
+      LORA_LOG("evicting stale node %08lx (age %lus)",
+               (unsigned long)knownNodes[i].chip_id,
+               (unsigned long)(ageMs(knownNodes[i].last_seen_ms) / 1000));
+      for (int j = i; j < knownCount - 1; j++) knownNodes[j] = knownNodes[j + 1];
+      memset(&knownNodes[knownCount - 1], 0, sizeof(KnownNode));
+      knownCount--;
+      loraNodesEvicted++;
+    } else i++;
+  }
+}
+
+// ─────────────────────────────────────────────
+//  T2.5 — EU duty cycle budget
+// ─────────────────────────────────────────────
+uint16_t dutyBucketMs[DUTY_BUCKETS];
+uint8_t  dutyBucketIdx    = 0;
+uint32_t dutyBucketStart  = 0;
+
+// LoRa time-on-air, Semtech AN1200.13. BW is in kHz so tSym comes out in ms.
+uint32_t loraTimeOnAirMs(int payloadLen) {
+  const float tSym = (float)(1UL << LORA_SF) / (float)LORA_BW;
+  const int   cr   = LORA_CR - 4;   // 5..8 encodes 4/5..4/8
+  const int   de   = 0;             // low-data-rate optimise off at SF7/125 kHz
+  const int   ih   = 0;             // explicit header
+  const int   crc  = 1;
+  float tPreamble = ((float)LORA_PREAMBLE + 4.25f) * tSym;
+  int   num = 8 * payloadLen - 4 * LORA_SF + 28 + 16 * crc - 20 * ih;
+  int   den = 4 * (LORA_SF - 2 * de);
+  int   nPayload = 8;
+  if (num > 0) nPayload += (int)ceilf((float)num / (float)den) * (cr + 4);
+  return (uint32_t)(tPreamble + (float)nPayload * tSym + 0.5f);
+}
+
+static void dutyRotate() {
+  if (dutyBucketStart == 0) { dutyBucketStart = millis(); return; }
+  while (elapsed(dutyBucketStart, 60000UL)) {
+    dutyBucketIdx = (uint8_t)((dutyBucketIdx + 1) % DUTY_BUCKETS);
+    dutyBucketMs[dutyBucketIdx] = 0;
+    dutyBucketStart += 60000UL;
+  }
+}
+
+void dutyRecord(uint32_t airMs) {
+  dutyRotate();
+  uint32_t v = dutyBucketMs[dutyBucketIdx] + airMs;
+  dutyBucketMs[dutyBucketIdx] = (uint16_t)(v > 65535 ? 65535 : v);
+}
+
+float dutyCyclePct() {
+  dutyRotate();
+  uint32_t total = 0;
+  for (int i = 0; i < DUTY_BUCKETS; i++) total += dutyBucketMs[i];
+  return (float)total * 100.0f / 3600000.0f;
+}
+
+bool dutyBudgetExceeded() { return dutyCyclePct() >= DUTY_LIMIT_PCT; }
+
 // ─────────────────────────────────────────────
 //  T1.1 — duplicate suppression
 // ─────────────────────────────────────────────
@@ -208,12 +316,15 @@ struct TxFrame {
   uint32_t sendAfterMs;
   uint8_t  cadTries;
   bool     active;
+  bool     urgent;     // false = deferrable when over the duty budget (T2.5)
 };
 TxFrame txq[TXQ_SIZE];
 
 uint8_t txSeq = 0;   // rolling per-sender counter
 
-bool enqueueTx(const void* pkt, int len, uint32_t delayMs = 0) {
+// urgent: anything a player is waiting on, plus ACKs and replies. Beacons are
+// not urgent — they are the one thing worth delaying to stay inside the budget.
+bool enqueueTx(const void* pkt, int len, uint32_t delayMs = 0, bool urgent = true) {
   if (len <= 0 || len > 64) return false;
   for (int i = 0; i < TXQ_SIZE; i++) {
     if (txq[i].active) continue;
@@ -222,6 +333,7 @@ bool enqueueTx(const void* pkt, int len, uint32_t delayMs = 0) {
     txq[i].sendAfterMs = millis() + delayMs;
     txq[i].cadTries    = 0;
     txq[i].active      = true;
+    txq[i].urgent      = urgent;
     return true;
   }
   loraTxQueueDrops++;
@@ -262,11 +374,11 @@ PendingTx pendingUser  = {};   // local player's action — drives portal status
 PendingTx pendingReply = {};   // answering a peer — silent, never touches the UI
 
 // Fire-and-forget. Used for broadcasts (beacons) and ACKs.
-bool loraSendUnreliable(void* pkt, int len) {
+bool loraSendUnreliable(void* pkt, int len, bool urgent = true) {
   if (!loraReady) return false;
   PktHeader* h = (PktHeader*)pkt;
   h->seq = txSeq++;
-  return enqueueTx(pkt, len);
+  return enqueueTx(pkt, len, 0, urgent);
 }
 
 // Arm one slot with a frame and hand it to the TX queue.
@@ -331,7 +443,7 @@ void loraSendBeacon() {
   fillHdr(&pkt.hdr, PKT_BEACON, 0);
   pkt.level   = (uint8_t)myLevel;
   pkt.faction = myFaction.length() > 0 ? myFaction.charAt(0) : '?';
-  if (loraSendUnreliable(&pkt, sizeof(pkt))) loraBeaconsSent++;
+  if (loraSendUnreliable(&pkt, sizeof(pkt), /*urgent=*/false)) loraBeaconsSent++;
 }
 
 void loraSendRecon(uint32_t target_id) {
@@ -452,9 +564,9 @@ void loraHandlePacket(uint8_t* buf, int len) {
     case PKT_BEACON: {
       if (len < (int)sizeof(PktBeacon)) return;
       PktBeacon* p = (PktBeacon*)buf;
-      KnownNode* n = findOrAddNode(p->hdr.from_id);
+      KnownNode* n = touchNode(p->hdr.from_id);
       if (!n) return;
-      n->level = p->level; n->faction = (char)p->faction; n->last_seen_ms = millis();
+      n->level = p->level; n->faction = (char)p->faction;
       break;
     }
     case PKT_RECON_REQ: {
@@ -466,16 +578,14 @@ void loraHandlePacket(uint8_t* buf, int len) {
       fillHdr(&reply.hdr, PKT_RECON_REPLY, hdr->from_id);
       reply.stat_type = types[pick]; reply.stat_value = stats[pick];
       deferReply(&reply, sizeof(reply));
-      KnownNode* n = findOrAddNode(hdr->from_id);
-      if (n) n->last_seen_ms = millis();
+      touchNode(hdr->from_id);
       break;
     }
     case PKT_RECON_REPLY: {
       if (len < (int)sizeof(PktReconReply)) return;
       PktReconReply* p = (PktReconReply*)buf;
-      KnownNode* n = findOrAddNode(p->hdr.from_id);
+      KnownNode* n = touchNode(p->hdr.from_id);
       if (!n) return;
-      n->last_seen_ms = millis();
       for (int i = 0; i < n->recon_count; i++)
         if (n->recon_types[i] == p->stat_type) return;   // already know this stat
       if (n->recon_count < 3) {
@@ -492,16 +602,15 @@ void loraHandlePacket(uint8_t* buf, int len) {
       reply.firewall = (uint8_t)skillFirewall;
       reply.faction  = myFaction.length() > 0 ? myFaction.charAt(0) : '?';
       deferReply(&reply, sizeof(reply));
-      KnownNode* n = findOrAddNode(hdr->from_id);
-      if (n) n->last_seen_ms = millis();
+      touchNode(hdr->from_id);
       break;
     }
     case PKT_HACK_REPLY: {
       if (len < (int)sizeof(PktHackReply)) return;
       PktHackReply* p = (PktHackReply*)buf;
-      KnownNode* n = findOrAddNode(p->hdr.from_id);
+      KnownNode* n = touchNode(p->hdr.from_id);
       if (!n) return;
-      n->faction = (char)p->faction; n->last_seen_ms = millis();
+      n->faction = (char)p->faction;
       bool haveFw = false;
       for (int i = 0; i < n->recon_count; i++)
         if (n->recon_types[i] == STAT_FIREWALL) haveFw = true;
@@ -515,8 +624,7 @@ void loraHandlePacket(uint8_t* buf, int len) {
     case PKT_HACK_RESULT: {
       if (len < (int)sizeof(PktHackResult)) return;
       PktHackResult* p = (PktHackResult*)buf;
-      KnownNode* n = findOrAddNode(hdr->from_id);
-      if (n) n->last_seen_ms = millis();
+      touchNode(hdr->from_id);
       // Surface it — the defender previously had no idea they'd been hit.
       pendingHackAlert       = true;
       pendingHackFrom        = chipIdStr(hdr->from_id);
@@ -526,15 +634,16 @@ void loraHandlePacket(uint8_t* buf, int len) {
     case PKT_MSG: {
       if (len < (int)sizeof(PktMsg)) return;
       PktMsg* p = (PktMsg*)buf;
-      KnownNode* n = findOrAddNode(p->hdr.from_id);
+      KnownNode* n = touchNode(p->hdr.from_id);
       if (n) {
         strncpy(n->msg_inbox, p->text, 32); n->msg_inbox[32] = '\0';
-        n->msg_unread = true; n->last_seen_ms = millis();
+        n->msg_unread = true;
         pendingMsg = String(p->text); pendingMsgFrom = chipIdStr(p->hdr.from_id);
       }
       break;
     }
     case PKT_PING:
+      touchNode(hdr->from_id);
       break;   // the ACK above is the entire point of a ping
     default: break;
   }
@@ -583,11 +692,21 @@ bool loraSetup() {
 static void serviceTxQueue() {
   if (radioState == RS_TX) return;          // one frame in flight at a time
 
+  bool overBudget = dutyBudgetExceeded();
+
   int idx = -1;
   uint32_t now = millis();
   for (int i = 0; i < TXQ_SIZE; i++) {
     if (!txq[i].active) continue;
     if ((int32_t)(now - txq[i].sendAfterMs) < 0) continue;
+    // Over the duty budget, hold back anything nobody is waiting on (T2.5).
+    // Urgent frames still go: refusing to answer a player to protect an
+    // airtime budget would be worse than the budget being tight.
+    if (overBudget && !txq[i].urgent) {
+      txq[i].sendAfterMs = millis() + 60000UL;
+      loraDutyDeferred++;
+      continue;
+    }
     idx = i; break;
   }
   if (idx < 0) return;
@@ -623,10 +742,46 @@ static void serviceTxQueue() {
   if (pendingUser.active && pendingUser.seq == h->seq && loraActionState == LA_SENDING)
     loraActionState = LA_WAITING;
 
+  dutyRecord(loraTimeOnAirMs(txq[idx].len));   // T2.5
+
   txq[idx].active = false;
   radioState      = RS_TX;
   txStartMs       = millis();
   loraPktSent++;
+}
+
+// ─────────────────────────────────────────────
+//  T2.4 — adaptive beacon scheduling
+// ─────────────────────────────────────────────
+uint32_t loraBeaconInterval() {
+  bool fast = (int32_t)(millis() - loraFastUntilMs) < 0;
+  return fast ? (uint32_t)random(LORA_BEACON_FAST_MIN_MS, LORA_BEACON_FAST_MAX_MS)
+              : (uint32_t)random(LORA_BEACON_MIN_MS,      LORA_BEACON_MAX_MS);
+}
+
+static void serviceBeacon() {
+  if (!loraBeaconEnabled || !loraReady) return;
+
+  // Boot burst: the sketch sends one beacon as soon as it is configured, then
+  // we follow up at ~3 s and ~8 s so a device joining a group is discovered in
+  // seconds rather than up to half a minute (T1.7).
+  if (loraNextBeaconMs == 0) { loraNextBeaconMs = millis() + 3000; return; }
+  if ((int32_t)(millis() - loraNextBeaconMs) < 0) return;
+
+  loraSendBeacon();
+  if (loraBootBurst < 2) {
+    loraBootBurst++;
+    loraNextBeaconMs = millis() + 5000;
+  } else {
+    loraNextBeaconMs = millis() + loraBeaconInterval();
+  }
+}
+
+static void serviceNodePrune() {
+  static uint32_t lastPrune = 0;
+  if (!elapsed(lastPrune, NODE_PRUNE_MS)) return;
+  lastPrune = millis();
+  pruneNodes();
 }
 
 // Retry / expire one reliable slot (T1.2).
@@ -712,8 +867,10 @@ void loraTick() {
   }
 
   servicePendingTx();
+  serviceBeacon();
   serviceTxQueue();
   serviceRxWatchdog();
+  serviceNodePrune();
 }
 
 // ─────────────────────────────────────────────
@@ -734,6 +891,33 @@ char factionChar() {
   if (myFaction == "RED")   return 'R';
   if (myFaction == "GREEN") return 'G';
   return '?';
+}
+
+// Per-node feed for the radar UI (T2.1 / T3.4).
+String loraNodesJson() {
+  String j = "[";
+  for (int i = 0; i < knownCount; i++) {
+    KnownNode* n = &knownNodes[i];
+    if (i) j += ",";
+    j += "{\"id\":\""      + chipIdStr(n->chip_id) + "\",";
+    j += "\"name\":\""     + nodeNameFromId(n->chip_id) + "\",";
+    j += "\"level\":"      + String(n->level) + ",";
+    j += "\"faction\":\""  + String(n->faction) + "\",";
+    j += "\"rssi\":"       + String(n->rssi) + ",";
+    j += "\"avgRssi\":"    + String(nodeAvgRssi(n)) + ",";
+    j += "\"snr\":"        + String(n->snr10 / 10.0f, 1) + ",";
+    j += "\"bars\":"       + String(nodeSignalBars(n)) + ",";
+    j += "\"proximity\":\""+ String(nodeProximity(n)) + "\",";
+    j += "\"status\":\""   + String(nodeStatusText(n)) + "\",";
+    j += "\"ageMs\":"      + String(ageMs(n->last_seen_ms)) + ",";
+    j += "\"recon\":"      + String(n->recon_count) + ",";
+    j += "\"hacked\":"     + String(n->hack_attempted ? "true" : "false") + ",";
+    j += "\"hackWon\":"    + String(n->hack_won ? "true" : "false") + ",";
+    j += "\"unread\":"     + String(n->msg_unread ? "true" : "false");
+    j += "}";
+  }
+  j += "]";
+  return j;
 }
 
 // Packet delivery ratio for the T0.4 bench test.
@@ -768,6 +952,10 @@ String loraDiagJson() {
   j += "\"txqDepth\":"      + String(txQueueDepth()) + ",";
   j += "\"watchdog\":"      + String(loraWatchdogFires) + ",";
   j += "\"reinits\":"       + String(loraReinits) + ",";
+  j += "\"nodesEvicted\":"  + String(loraNodesEvicted) + ",";
+  j += "\"dutyCyclePct\":"  + String(dutyCyclePct(), 3) + ",";
+  j += "\"dutyDeferred\":"  + String(loraDutyDeferred) + ",";
+  j += "\"beaconFast\":"    + String(((int32_t)(millis() - loraFastUntilMs) < 0) ? "true" : "false") + ",";
   j += "\"deliveryPct\":"   + String(loraDeliveryRatio(), 1) + ",";
   j += "\"lastPktType\":\"" + String(pktTypeName(loraLastPktType)) + "\",";
   j += "\"lastPktLen\":"    + String(loraLastPktLen) + ",";

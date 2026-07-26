@@ -131,12 +131,25 @@ struct PktPing {
 
 #pragma pack(pop)
 
+// ── Node presence (T2.3) ─────────────────────
+#define NODE_ACTIVE_MS   90000UL    // seen within 90 s → ACTIVE
+#define NODE_FADING_MS  300000UL    // 90 s – 5 min → FADING, then evicted
+#define RSSI_HIST        4          // rolling average depth (T2.1)
+
 // ── Known node entry ─────────────────────────
 struct KnownNode {
   uint32_t      chip_id;
   uint8_t       level;
   char          faction;        // 'B','W','R','G','?'
   unsigned long last_seen_ms;
+  unsigned long first_seen_ms;
+
+  // Signal (T2.1) — per node, not one global overwritten by whatever arrived last
+  int16_t       rssi;                // most recent, dBm
+  int16_t       snr10;               // most recent SNR × 10
+  int16_t       rssi_hist[RSSI_HIST];
+  uint8_t       rssi_idx;
+  uint8_t       rssi_n;              // samples collected so far (0..RSSI_HIST)
 
   // Recon — up to 3 attempts, one stat revealed per attempt
   uint8_t       recon_count;         // how many recons done (0-3)
@@ -154,6 +167,53 @@ struct KnownNode {
 };
 
 #define MAX_KNOWN_NODES 20
+
+// ── Rollover-safe helpers (T2.2) ─────────────
+// Unsigned subtraction stays correct across the 49-day millis() wrap; direct
+// comparison of two millis() values does not.
+inline uint32_t ageMs(unsigned long stampMs) {
+  return (uint32_t)(millis() - stampMs);
+}
+inline bool elapsed(unsigned long stampMs, uint32_t windowMs) {
+  return ageMs(stampMs) >= windowMs;
+}
+
+inline int16_t nodeAvgRssi(const KnownNode* n) {
+  if (!n || n->rssi_n == 0) return 0;
+  int32_t sum = 0;
+  for (uint8_t i = 0; i < n->rssi_n; i++) sum += n->rssi_hist[i];
+  return (int16_t)(sum / n->rssi_n);
+}
+
+// Plain-language range band for the portal's radar (T3.4).
+inline const char* nodeProximity(const KnownNode* n) {
+  if (!n || n->rssi_n == 0) return "UNKNOWN";
+  int16_t r = nodeAvgRssi(n);
+  if (r >= -60)  return "VERY CLOSE";
+  if (r >= -85)  return "CLOSE";
+  if (r >= -105) return "DISTANT";
+  return "FADING";
+}
+
+inline uint8_t nodeSignalBars(const KnownNode* n) {
+  if (!n || n->rssi_n == 0) return 0;
+  int16_t r = nodeAvgRssi(n);
+  if (r >= -60)  return 4;
+  if (r >= -85)  return 3;
+  if (r >= -105) return 2;
+  return 1;
+}
+
+inline bool nodeIsActive(const KnownNode* n) {
+  return n && ageMs(n->last_seen_ms) < NODE_ACTIVE_MS;
+}
+inline bool nodeIsExpired(const KnownNode* n) {
+  return n && ageMs(n->last_seen_ms) >= NODE_FADING_MS;
+}
+inline const char* nodeStatusText(const KnownNode* n) {
+  if (!n) return "GONE";
+  return nodeIsActive(n) ? "ACTIVE" : (nodeIsExpired(n) ? "GONE" : "FADING");
+}
 
 // ── Deterministic name from chip_id ──────────
 //  Same chip_id always produces same name on every device.

@@ -1863,8 +1863,12 @@ void setup() {
   server.on("/api/ping", handleApiPing);
   server.begin();
 
-  // First beacon immediately; loop() follows up at ~3 s and ~8 s (T1.7)
-  if (myName != "") loraSendBeacon();
+  // First beacon immediately; loraTick() follows up at ~3 s and ~8 s, then
+  // settles into the adaptive cadence (T1.7 / T2.4).
+  if (myName != "" && myFaction != "NONE") {
+    loraBeaconEnabled = true;
+    loraSendBeacon();
+  }
 
   if (myName == "" || myFaction == "NONE") displaySetup();
   else                                     displayIdle();
@@ -1913,33 +1917,8 @@ void loop() {
     revertIdleAtMs = millis() + 5000;
   }
 
-  // Beacon on a jittered 25–35 s interval (T1.7 — fixes D2).
-  // A fixed cadence let two devices lock into phase and collide on every
-  // single beacon, permanently. Boot burst below makes joining fast.
-  static unsigned long lastBeacon  = 0;
-  static unsigned long beaconEvery = 0;
-  static uint8_t       bootBurst   = 0;
-  static unsigned long bootBurstAt = 0;
-
-  if (bootBurst < 2) {
-    // Extra beacons at ~3 s and ~8 s after boot so a device joining a group
-    // is discovered in seconds rather than up to half a minute.
-    if (bootBurstAt == 0) bootBurstAt = millis() + 3000;
-    if ((int32_t)(millis() - bootBurstAt) >= 0) {
-      loraSendBeacon();
-      bootBurst++;
-      bootBurstAt = millis() + 5000;
-      lastBeacon  = millis();
-    }
-  }
-
-  if (beaconEvery == 0)
-    beaconEvery = random(LORA_BEACON_MIN_MS, LORA_BEACON_MAX_MS);
-  if ((uint32_t)(millis() - lastBeacon) > beaconEvery) {
-    lastBeacon  = millis();
-    beaconEvery = random(LORA_BEACON_MIN_MS, LORA_BEACON_MAX_MS);
-    loraSendBeacon();
-  }
+  // Beaconing is scheduled inside loraTick() now (T1.7 boot burst + T2.4
+  // adaptive cadence), so there is nothing to do here.
 
   // Mood drift + display refresh every 10 minutes
   // Long interval so display.update() (~2s) rarely blocks the loop

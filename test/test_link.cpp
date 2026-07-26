@@ -40,6 +40,11 @@ void resetAll() {
   loraDroppedNotForMe = loraTxQueueDrops = loraWatchdogFires = loraReinits = 0;
   loraActionState = LA_IDLE; loraActionTries = 0;
   pendingHackAlert = false; pendingMsg = "";
+  loraNodesEvicted = 0; loraDutyDeferred = 0;
+  memset(dutyBucketMs, 0, sizeof(dutyBucketMs));
+  dutyBucketIdx = 0; dutyBucketStart = 0;
+  loraBeaconEnabled = false; loraNextBeaconMs = 0;
+  loraFastUntilMs = 0; loraBootBurst = 0;
   radio.sent.clear(); radio.rxBuf.clear();
   radio.cadBusy = false; radio.failTransmit = false; radio.failReceive = false;
   radio.startRxCalls = 0; radio.beginCalls = 0;
@@ -335,6 +340,131 @@ int main() {
     CHECK(!seenBefore(PEER, 0),                    "oldest entry aged out of the ring");
     CHECK(seenBefore(PEER, SEEN_RING_SIZE + 3),    "newest entry retained");
     CHECK(!seenBefore(0xDEADBEEF, 5),              "different sender is not a dup");
+  }
+
+  // ── Phase 2 ──
+  printf("T2.1 per-node signal\n");
+  {
+    resetAll();
+    PktBeacon b;
+    for (int i = 0; i < 3; i++) {
+      mkHdr(&b.hdr, PKT_BEACON, (uint8_t)i, 0, PEER, 0);
+      b.level = 6; b.faction = 'R';
+      deliver(&b, sizeof(b));
+    }
+    KnownNode* n = findNode(PEER);
+    CHECK(n && n->rssi == -70,   "per-node RSSI recorded");
+    CHECK(n && n->rssi_n == 3,   "rolling window fills");
+    CHECK(n && nodeAvgRssi(n) == -70, "average over the window");
+    CHECK(n && n->snr10 == 95,   "per-node SNR recorded (x10)");
+    CHECK(nodeSignalBars(n) == 3,       "-70 dBm maps to 3 bars");
+    CHECK(String(nodeProximity(n)) == "CLOSE", "-70 dBm reads as CLOSE");
+    CHECK(n && n->first_seen_ms != 0,   "first_seen recorded");
+  }
+  {
+    // Every packet type must refresh presence, not just beacons.
+    resetAll();
+    PktPing p;
+    mkHdr(&p.hdr, PKT_PING, 1, PKTFLAG_ACK_REQ, PEER, myChipID32);
+    deliver(&p, sizeof(p));
+    CHECK(findNode(PEER) != nullptr, "a ping registers the sender as present");
+  }
+
+  printf("T2.2 rollover-safe ageing\n");
+  {
+    resetAll();
+    PktBeacon b; mkHdr(&b.hdr, PKT_BEACON, 1, 0, PEER, 0);
+    b.level = 2; b.faction = 'W';
+    g_millis = 0xFFFFF000;                 // just before the 49-day wrap
+    deliver(&b, sizeof(b));
+    g_millis = 0x00002000;                 // wrapped: ~12 s later in real time
+    KnownNode* n = findNode(PEER);
+    CHECK(n && ageMs(n->last_seen_ms) < 30000, "age stays correct across wrap");
+    CHECK(nodeIsActive(n),                     "node still ACTIVE across wrap");
+  }
+
+  printf("T2.3 node expiry\n");
+  {
+    resetAll();
+    PktBeacon b; mkHdr(&b.hdr, PKT_BEACON, 1, 0, PEER, 0);
+    b.level = 2; b.faction = 'W';
+    deliver(&b, sizeof(b));
+    CHECK(knownCount == 1, "node present");
+    CHECK(String(nodeStatusText(findNode(PEER))) == "ACTIVE", "fresh node is ACTIVE");
+
+    advance(NODE_ACTIVE_MS + 1000);
+    CHECK(String(nodeStatusText(findNode(PEER))) == "FADING", "goes FADING after 90 s");
+    pruneNodes();
+    CHECK(knownCount == 1, "FADING nodes are kept");
+
+    advance(NODE_FADING_MS);
+    pruneNodes();
+    CHECK(knownCount == 0,        "evicted after 5 min unheard");
+    CHECK(loraNodesEvicted == 1,  "eviction counted");
+  }
+
+  printf("T2.4 adaptive beacon\n");
+  {
+    resetAll();
+    loraFastUntilMs = millis() + BEACON_FAST_WINDOW_MS;
+    uint32_t fast = loraBeaconInterval();
+    CHECK(fast >= LORA_BEACON_FAST_MIN_MS && fast < LORA_BEACON_FAST_MAX_MS,
+          "fast mode uses the 12-18 s window");
+    loraFastUntilMs = 0;
+    uint32_t slow = loraBeaconInterval();
+    CHECK(slow >= LORA_BEACON_MIN_MS && slow < LORA_BEACON_MAX_MS,
+          "steady state uses the 25-35 s window");
+  }
+  {
+    // Meeting a new node should re-trigger fast discovery.
+    resetAll();
+    loraFastUntilMs = 0;
+    PktBeacon b; mkHdr(&b.hdr, PKT_BEACON, 1, 0, PEER, 0);
+    b.level = 4; b.faction = 'G';
+    deliver(&b, sizeof(b));
+    CHECK((int32_t)(millis() - loraFastUntilMs) < 0, "new node triggers fast beaconing");
+  }
+  {
+    resetAll();
+    loraBeaconEnabled = true;
+    loraNextBeaconMs = 0; loraBootBurst = 0;
+    run(200);
+    CHECK(sentCountOfType(PKT_BEACON) == 0, "no beacon before the 3 s mark");
+    run(4000);
+    CHECK(sentCountOfType(PKT_BEACON) == 1, "boot burst beacon at ~3 s");
+    run(6000);
+    CHECK(sentCountOfType(PKT_BEACON) == 2, "second boot burst beacon at ~8 s");
+    loraBeaconEnabled = false;
+  }
+
+  printf("T2.5 duty cycle budget\n");
+  {
+    resetAll();
+    uint32_t toa = loraTimeOnAirMs(sizeof(PktBeacon));
+    // SF7/125 kHz, 13-byte payload: tens of milliseconds.
+    CHECK(toa > 20 && toa < 100, "time-on-air is plausible for SF7/125 kHz");
+    printf("       (beacon airtime %u ms, msg airtime %u ms)\n",
+           toa, loraTimeOnAirMs(sizeof(PktMsg)));
+    CHECK(loraTimeOnAirMs(sizeof(PktMsg)) > toa, "longer payload takes longer");
+  }
+  {
+    resetAll();
+    CHECK(dutyCyclePct() == 0.0f, "starts at zero");
+    dutyRecord(36000);                       // 36 s in the hour = 1%
+    CHECK(dutyCyclePct() > 0.99f && dutyCyclePct() < 1.01f, "1% computed correctly");
+    CHECK(dutyBudgetExceeded(), "1% is over the 0.8% soft cap");
+  }
+  {
+    // Over budget: beacons wait, player actions do not.
+    resetAll();
+    dutyRecord(36000);
+    loraSendBeacon();
+    run(300);
+    CHECK(sentCountOfType(PKT_BEACON) == 0, "beacon deferred while over budget");
+    CHECK(loraDutyDeferred > 0,             "deferral counted");
+    loraSendRecon(PEER);
+    run(300);
+    CHECK(sentCountOfType(PKT_RECON_REQ) == 1, "player's action still goes out");
   }
 
   printf("\n%d checks, %d failures\n", checks, failures);
