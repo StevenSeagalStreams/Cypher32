@@ -35,7 +35,7 @@ Flash it. Power it. Pick a side. That's all it takes to enter the network.
 2. Install these libraries via Library Manager:
    - **RadioLib** (version 7.1 or later)
    - **heltec-eink-modules**
-3. Open `cypher32_v52.ino`. All source files (`cypher32_packets.h`, `cypher32_lora.h`) must be in the same folder.
+3. Open `cypher32.ino`. All headers must be in the same folder.
 4. Select board: **Heltec Wireless Paper**.
 5. Click **Upload**.
 
@@ -57,13 +57,19 @@ The device is already broadcasting. An open Wi-Fi network named **`Cypher32`** a
 
 ### Step 3 — Connect
 
-Join **`Cypher32`** on your phone or laptop. Open a browser:
+Join **`Cypher32`** on your phone or laptop. The portal should open by itself —
+the device runs a captive portal, so your phone's "sign in to network" prompt
+lands you straight on it.
+
+If it doesn't, open a browser and go to:
 
 ```
 192.168.4.1
 ```
+or `cypher32.local`
 
-The portal loads. You have one decision to make before you're locked in.
+A three-step setup walks you through what the game is, what each faction does,
+and setting a password.
 
 ---
 
@@ -72,9 +78,11 @@ The portal loads. You have one decision to make before you're locked in.
 The setup screen asks two things:
 
 1. **Faction** — your allegiance, your combat style, your starting advantage. Not reversible without a full wipe. Choose what fits how you fight (see [Factions](#factions)).
-2. **Password** — locks the portal after reboot. Don't forget it.
+2. **Password** — the device's Wi-Fi is open by design, so anyone nearby can
+   reach this page. The password is what stops them spending your skill points
+   or wiping your character. Minimum six characters.
 
-Hit **Save & Reboot**. The device goes dark for a moment.
+Hit **ESTABLISH UPLINK**. The device goes dark for a moment.
 
 ---
 
@@ -89,7 +97,10 @@ The display comes alive:
 - A speech bubble with something to say
 - XP bar and skill indicators along the bottom
 
-Your Wi-Fi SSID has changed to `C32_<Faction>_<Name>`. The portal now requires your password. And every 30 seconds your device pulses a LoRa beacon into the air, announcing your presence to anyone in range.
+Your Wi-Fi SSID has changed to `C32_<Faction>_<Name>`. The portal is readable by
+anyone, but every action now needs your password. Your device beacons every
+12–18 seconds at first so nearby players find you quickly, settling to 25–35
+seconds once you've been discovered.
 
 > **Factory reset:** hold **PRG** for 5 seconds. Everything wipes. You start over as nobody.
 
@@ -101,11 +112,18 @@ Your command interface. Connect to the device's Wi-Fi and open **192.168.4.1**.
 
 | Tab | Function |
 |-----|----------|
-| **HUD** | Level, XP, skills, battery, LoRa signal, manual beacon |
-| **Nodes** | All nodes in range — run recon, launch hacks |
+| **HUD** | Level, XP, skills, battery, radio status, manual beacon |
+| **Radar** | Everyone in range, sorted by signal — recon and hack from here |
 | **Skills** | Spend skill points from level-ups |
-| **Messages** | Send and receive LoRa text — 32 chars max |
-| **Settings** | Change password, LoRa details, factory reset |
+| **Msgs** | Send and receive LoRa text — 32 chars max |
+| **Config** | Password, identity, node list, factory reset, diagnostics |
+
+The page never reloads. It polls the device twice a second, so signal strength,
+cooldown countdowns and action status update live.
+
+**Every action tells you what happened.** Press HACK and you get
+`SENDING… → WAITING FOR REPLY (2/4) → SUCCESS`, or `NO RESPONSE — out of range?`
+if the target never answered. Nothing fails silently.
 
 ---
 
@@ -157,17 +175,25 @@ Every successful hack earns XP. Enough and you level up. The climb gets steeper 
 This is what it's all for.
 
 **1. Find a target.**  
-Nodes appear in the **Nodes** tab when their beacon reaches you. Level and faction are visible. Everything else is dark until you probe for it.
+Players appear in the **Radar** tab when their beacon reaches you, sorted by
+signal strength with a plain-language range — VERY CLOSE, CLOSE, DISTANT,
+FADING. Level and faction are visible. Everything else is dark until you probe.
 
 **2. Run recon.**  
 Up to 3 attempts. Each request goes out over LoRa and the target's device replies with a random stat — Brute, Stealth, or Firewall. They don't choose what you see. Their device just responds. Build a picture before you commit.
 
 **3. Hack.**  
-One attempt. One roll. The result appears on both displays at the same time.
+One attempt. One roll — made by *their* device, not yours, so nobody can modify
+their firmware to declare themselves the winner. The result appears on both
+displays. They find out the moment your request lands, whether or not you tell
+them how it went.
 
 **4. Win** — target locked for **7 days**. They're yours and they know it.
 
 **5. Lose** — locked out of that node for **12 hours**. Move on.
+
+Both cooldowns survive a reboot and survive the target walking out of range, so
+neither can be reset by power-cycling or waiting for them to drop off your radar.
 
 **Hit chance:**
 ```
@@ -196,8 +222,23 @@ All traffic runs at **868 MHz — SF7 — BW 125 kHz — CR 4/5 — sync 0x12**.
 | `HACK_REPLY` | unicast | Defender returns Firewall and faction |
 | `HACK_RESULT` | unicast | Outcome and XP delta sent to defender |
 | `MSG` | unicast | Raw text, 32 chars |
+| `ACK` | unicast | Link-layer acknowledgement |
+| `PING` | unicast | Reliable no-op — round-trip probe |
+
+Every frame carries a 4-byte HMAC tag keyed on a shared secret in
+`cypher32_packets.h`. **Change `LORA_KEY` before you deploy.** It is not real
+security — the key is compiled into every device — but it stops someone with a
+spare radio injecting packets to award themselves XP.
 
 Defined in `cypher32_packets.h`.
+
+Every unicast carries a sequence number and is acknowledged. Unacknowledged
+frames are retried up to four times before the portal reports `NO RESPONSE` —
+an action never just silently disappears. Duplicates are suppressed, replies are
+deferred so they don't collide with the requester re-arming its receiver, and the
+radio listens before transmitting.
+
+Diagnostics live at `192.168.4.1/api/diag`.
 
 ---
 
@@ -218,10 +259,25 @@ The character notices when you're losing.
 
 | File | Purpose |
 |------|---------|
-| `cypher32_v52.ino` | Main sketch — game logic, web portal, display |
-| `cypher32_packets.h` | Packet types, structs, `KnownNode`, name generator |
-| `cypher32_lora.h` | Header-only LoRa driver (RadioLib SX1262 wrapper) |
+| `cypher32.ino` | Main sketch — game logic, display, portal API |
+| `cypher32_packets.h` | Packet types, `KnownNode`, node helpers, shared key |
+| `cypher32_lora.h` | LoRa stack — link layer, retries, presence, diagnostics |
+| `cypher32_crypto.h` | SHA-256 / HMAC-SHA256 for frame signing |
+| `cypher32_portal.h` | The web portal, one HTML/CSS/JS blob in PROGMEM |
 | `platformio.ini` | PlatformIO build config |
+| `ROADMAP.md` | Development plan and current status |
+| `test/` | Host-side tests — `cd test && make` |
+
+## Tests
+
+```
+cd test && make          # link layer, two-node simulation, portal
+cd test && make asan     # same, under AddressSanitizer + UBSan
+```
+
+These compile the real headers against Arduino/RadioLib stubs and run the portal
+against a DOM shim. They exercise logic, not radios — see `ROADMAP.md` for what
+still needs verifying on hardware.
 
 ---
 
