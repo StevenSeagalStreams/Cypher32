@@ -233,8 +233,11 @@ textarea{min-height:64px;resize:none}
         <button class="btn ghost" onclick="act('clearnodes')">CLEAR NODE LIST</button>
         <button class="btn ghost" onclick="showDiag()">DIAGNOSTICS</button>
         <button class="btn danger" onclick="wipe()">FACTORY RESET</button>
-        <p class="xs mut">Factory reset erases your character permanently. You can
-        also hold the PRG button for 5 seconds.</p>
+        <p class="xs mut">Factory reset erases your character permanently.</p>
+        <p class="xs mut">Locked out or forgot the password? Do it on the device:
+        <b>tap RST twice quickly, then hold PRG for 5 seconds.</b> The screen
+        will confirm before it wipes. That works without the password &mdash;
+        holding the button <i>is</i> the proof you own it.</p>
       </div>
     </div>
 

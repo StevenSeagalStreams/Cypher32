@@ -102,7 +102,14 @@ anyone, but every action now needs your password. Your device beacons every
 12–18 seconds at first so nearby players find you quickly, settling to 25–35
 seconds once you've been discovered.
 
-> **Factory reset:** hold **PRG** for 5 seconds. Everything wipes. You start over as nobody.
+> **Factory reset:** tap **RST** twice quickly, then hold **PRG** for 5 seconds.
+> The screen confirms before it wipes. This needs no password — holding the
+> button on the device is the proof you own it, so it is also the way back in
+> if you forget one.
+>
+> Both buttons are involved because RST is wired to the ESP32's reset pin
+> rather than a GPIO: software cannot read it, so the double tap is inferred
+> from two boots cut short in a row, and PRG confirms.
 
 ---
 

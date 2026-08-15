@@ -44,6 +44,29 @@ uint32_t myChipID32 = makeChipID();
 #define PRG_PIN     0    // Built-in PRG button on Wireless Paper (active LOW)
 #define RESET_HOLD_MS 5000  // Hold 5 seconds to trigger factory reset
 
+// ── Two-button factory reset ─────────────────
+//
+//  The Wireless Paper has exactly two buttons: RST and PRG. RST is wired to
+//  the ESP32's EN pin — it is a hardware reset, not a GPIO. Software can never
+//  read it, and holding it just holds the chip in reset with nothing running.
+//  "Hold both for five seconds" therefore cannot be implemented literally on
+//  this board.
+//
+//  The gesture below uses both buttons and cannot happen by accident:
+//
+//      tap RST twice quickly, then hold PRG for 5 seconds
+//
+//  The double tap is inferred from boot history: a boot that lasted less than
+//  ARM_WINDOW_MS was cut short by someone pressing RST, so two in a row means
+//  a deliberate double tap. That arms the wipe; PRG then confirms it.
+//
+//  If your board turns out to have a second *readable* button, set
+//  RESET_BTN2_PIN to its GPIO number. The code then skips the arming step and
+//  requires both buttons genuinely held together instead.
+#define RESET_BTN2_PIN  -1        // GPIO of a second readable button, -1 = none
+#define ARM_WINDOW_MS    6000UL   // a boot shorter than this counts as an RST tap
+#define ARM_TIMEOUT_MS  20000UL   // armed state lapses if PRG isn't held
+
 #ifndef BLACK
   #define BLACK 0x0000
 #endif
@@ -1137,6 +1160,16 @@ void displayWiping() {
   display.update();
 }
 
+// Shown after a double RST tap, so the armed state is never invisible.
+void displayArmed() {
+  displayRefreshes++;
+  display.clearMemory(); display.landscape();
+  printCenter(34, "FACTORY RESET ARMED");
+  printCenter(52, "HOLD PRG 5s TO WIPE");
+  printCenter(70, "OR WAIT TO CANCEL");
+  display.update();
+}
+
 void displaySetup() {
   display.clearMemory(); display.landscape();
   printCenter(MARGIN_Y, "CYPHER32 // SETUP REQUIRED");
@@ -1476,9 +1509,40 @@ void wipeAndReboot() {
   ESP.restart();
 }
 
+bool     resetArmed        = false;
+uint32_t resetArmedAt      = 0;
+bool     bootCounterClosed = false;
+
 void initFactoryResetButton() {
   // GPIO0 = PRG/BTN-0 on the Wireless Paper schematic, active LOW.
   pinMode(PRG_PIN, INPUT_PULLUP);
+#if RESET_BTN2_PIN >= 0
+  pinMode(RESET_BTN2_PIN, INPUT_PULLUP);
+#endif
+
+  // Count this boot. The counter is zeroed once we have been up for
+  // ARM_WINDOW_MS, so it only ever climbs when boots are being cut short by
+  // someone tapping RST. Two in a row is a deliberate double tap.
+  preferences.begin("cypher-v8", false);
+  uint8_t taps = preferences.getUChar("rstc", 0);
+  if (taps < 250) taps++;
+  preferences.putUChar("rstc", taps);
+  preferences.end();
+
+  resetArmed   = (taps >= 2);
+  resetArmedAt = millis();
+  if (resetArmed) Serial.println("[FACTORY RESET] armed by double RST tap");
+}
+
+// Close the arming window: we have been up long enough that this was a normal
+// boot, so the next RST tap starts counting from one again.
+static void serviceBootCounter() {
+  if (bootCounterClosed) return;
+  if (millis() < ARM_WINDOW_MS) return;
+  bootCounterClosed = true;
+  preferences.begin("cypher-v8", false);
+  preferences.putUChar("rstc", 0);
+  preferences.end();
 }
 
 // Hold PRG for 5 seconds *while the device is running* to wipe everything.
@@ -1495,11 +1559,33 @@ void serviceFactoryResetButton() {
   static uint32_t heldSince = 0;
   static bool     warned    = false;
 
-  if (digitalRead(PRG_PIN) == LOW) {
+  serviceBootCounter();
+
+  bool prgDown = (digitalRead(PRG_PIN) == LOW);
+
+#if RESET_BTN2_PIN >= 0
+  // Board has a genuine second readable button: require both held.
+  bool combo = prgDown && (digitalRead(RESET_BTN2_PIN) == LOW);
+#else
+  // RST is not readable, so the double tap arms and PRG confirms.
+  bool combo = resetArmed && prgDown;
+
+  // Armed but nobody followed through — go back to normal.
+  if (resetArmed && !prgDown &&
+      (uint32_t)(millis() - resetArmedAt) > ARM_TIMEOUT_MS) {
+    resetArmed  = false;
+    lastIdleSig = 0xFFFFFFFF;
+    Serial.println("[FACTORY RESET] disarmed — PRG not held in time");
+    if (myName == "" || myFaction == "NONE") displaySetup();
+    else                                     displayIdle();
+  }
+#endif
+
+  if (combo) {
     if (heldSince == 0) { heldSince = millis(); warned = false; return; }
 
-    // Tell the user it is working, once, about halfway through. The e-ink
-    // update blocks ~2 s; releasing during it simply cancels on the next poll.
+    // Confirm it is working, once, partway through. The e-ink update blocks
+    // ~2 s; letting go during it simply cancels on the next poll.
     if (!warned && (uint32_t)(millis() - heldSince) > 1500) {
       warned = true;
       displayWiping();
@@ -1580,8 +1666,9 @@ void setup() {
     loraSendBeacon();
   }
 
-  if (myName == "" || myFaction == "NONE") displaySetup();
-  else                                     displayIdle();
+  if      (resetArmed)                          displayArmed();
+  else if (myName == "" || myFaction == "NONE") displaySetup();
+  else                                          displayIdle();
 
 }
 
