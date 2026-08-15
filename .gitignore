@@ -1,0 +1,6 @@
+test/test_link
+test/test_twonode
+test/portal/portal.html
+test/portal/portal.js
+test/portal/.run.js
+*.o
