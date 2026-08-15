@@ -78,8 +78,26 @@ textarea{min-height:64px;resize:none}
 .fc{border:1px solid #24402f;border-radius:10px;padding:12px;margin-bottom:10px;cursor:pointer;background:#0a1013}
 .fc.sel{border-color:#7dffa8;background:#0f2418}
 .step{display:none}.step.on{display:block}
+.modal{position:fixed;inset:0;background:#000c;z-index:200;display:flex;align-items:center;
+ justify-content:center;padding:16px}
+.modal .card{max-width:380px;width:100%;margin:0}
 </style></head><body>
 <div id="banner" class="banner"></div>
+
+<!-- Password entry. A real field, not prompt(): the captive-portal browser
+     that opens this page silently ignores prompt/alert/confirm. -->
+<div id="pwmodal" class="modal hide">
+  <div class="card">
+    <div class="ct">Device password</div>
+    <p class="xs mut">Needed for anything that changes the device.</p>
+    <input type="password" id="pwin" placeholder="Password" autocomplete="current-password">
+    <div class="xs" id="pwerr" style="color:#ff9a9a;min-height:15px;margin-top:4px"></div>
+    <button onclick="savePw()">UNLOCK</button>
+    <button class="btn ghost" onclick="closePw()">Cancel</button>
+    <p class="xs mut" style="margin-bottom:0">Forgotten it? On the device: tap
+    <b>RST</b> twice, then hold <b>PRG</b> for 5 seconds to wipe and start over.</p>
+  </div>
+</div>
 
 <!-- ══ SETUP WIZARD (T3.6) ══ -->
 <div id="setup" class="wrap hide">
@@ -225,6 +243,13 @@ textarea{min-height:64px;resize:none}
       </div>
       <div class="card">
         <div class="ct">Password</div>
+        <div class="kv"><span class="mut">This browser</span><span id="pwstate">—</span></div>
+        <p class="xs mut">Enter the device password once and this browser keeps it.</p>
+        <input type="password" id="curpw" placeholder="Device password" autocomplete="current-password">
+        <button class="btn ghost" onclick="unlockFromCfg()">SAVE PASSWORD</button>
+      </div>
+      <div class="card">
+        <div class="ct">Change password</div>
         <input type="password" id="npw" placeholder="New password (min 6)">
         <button class="btn ghost" onclick="changePw()">UPDATE PASSWORD</button>
       </div>
@@ -232,7 +257,7 @@ textarea{min-height:64px;resize:none}
         <div class="ct">Maintenance</div>
         <button class="btn ghost" onclick="act('clearnodes')">CLEAR NODE LIST</button>
         <button class="btn ghost" onclick="showDiag()">DIAGNOSTICS</button>
-        <button class="btn danger" onclick="wipe()">FACTORY RESET</button>
+        <button class="btn danger" id="wipebtn" onclick="wipe()">FACTORY RESET</button>
         <p class="xs mut">Factory reset erases your character permanently.</p>
         <p class="xs mut">Locked out or forgot the password? Do it on the device:
         <b>tap RST twice quickly, then hold PRG for 5 seconds.</b> The screen
@@ -268,11 +293,32 @@ function $(i){return document.getElementById(i)}
 function esc(s){return String(s==null?"":s).replace(/[&<>"]/g,function(c){
   return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]})}
 
-// ── password, asked once and remembered ──
-function pw(){var p=localStorage.getItem("c32pw");
-  if(!p){p=prompt("Device password");if(p)localStorage.setItem("c32pw",p)}
-  return p||""}
-function forgetPw(){localStorage.removeItem("c32pw")}
+// ── password ──
+// Held in a variable first and mirrored to localStorage. The captive-portal
+// webview may have storage disabled or throw on access, so every use is
+// guarded and the in-memory copy is what actually matters for this session.
+var pwCache="";
+function lsGet(k){try{return localStorage.getItem(k)}catch(e){return null}}
+function lsSet(k,v){try{localStorage.setItem(k,v)}catch(e){}}
+function lsDel(k){try{localStorage.removeItem(k)}catch(e){}}
+function pw(){return pwCache||lsGet("c32pw")||""}
+function setPw(v){pwCache=v;lsSet("c32pw",v)}
+function forgetPw(){pwCache="";lsDel("c32pw")}
+
+function needPw(msg){
+  $("pwin").value="";
+  $("pwerr").textContent=msg||"";
+  $("pwmodal").className="modal";
+  setTimeout(function(){try{$("pwin").focus()}catch(e){}},60)}
+function closePw(){$("pwmodal").className="modal hide"}
+function savePw(){
+  var v=$("pwin").value;
+  if(!v){$("pwerr").textContent="Enter the password.";return}
+  setPw(v);closePw();banner("Password saved","go")}
+function unlockFromCfg(){
+  var v=$("curpw").value;
+  if(!v){banner("Enter the password first","bad");return}
+  setPw(v);$("curpw").value="";banner("Password saved","go");render()}
 
 function banner(msg,kind,hold){
   var b=$("banner");b.className="banner "+kind;b.textContent=msg;
@@ -297,7 +343,7 @@ function finish(){
   if(a!==b){$("pwmsg").textContent="Passwords do not match.";return}
   if(!faction){$("pwmsg").textContent="Pick a faction first.";return}
   $("pwmsg").textContent="";
-  localStorage.setItem("c32pw",a);
+  setPw(a);
   banner("Configuring device…","wait",true);
   post("/api/setup",{f:faction,p:a}).then(function(){
     banner("Device configured. Rebooting…","go",true);
@@ -309,12 +355,13 @@ function post(url,data){
     return encodeURIComponent(k)+"="+encodeURIComponent(data[k])}).join("&");
   return fetch(url,{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:body})
     .then(function(r){
-      if(r.status===401){forgetPw();throw new Error("Wrong password")}
+      if(r.status===401){forgetPw();var e=new Error("Wrong password");e.code=401;throw e}
       return r.json().catch(function(){return{}})})}
 
 // Every action reports SENDING -> WAITING -> SUCCESS / NO RESPONSE (T3.5).
 function act(what,extra){
   if(busy)return;
+  if(!pw()){needPw("Enter the device password to continue.");return}
   var d=extra||{};d.a=what;d.pw=pw();
   busy=true;lastAction=what;
   banner("SENDING…","wait",true);
@@ -324,19 +371,29 @@ function act(what,extra){
     if(r&&r.instant){banner(r.msg||"Done","go");refresh();return}
     banner("WAITING FOR REPLY…","wait",true);   // poll picks it up from here
     refresh()
-  }).catch(function(e){busy=false;banner(e.message||"Failed","bad")})}
+  }).catch(function(e){busy=false;
+    if(e.code===401){needPw("That password was not accepted. Try again.");return}
+    banner(e.message||"Failed","bad")})}
 
 function sendMsg(){var t=$("mtxt").value.trim();if(!t)return;
   act("msg",{id:$("mto").value,txt:t});$("mtxt").value="";$("mcount").textContent="0 / 32"}
 function changePw(){var p=$("npw").value;
   if(p.length<6){banner("Password must be at least 6 characters","bad");return}
-  var d={a:"setpw",np:p,pw:pw()};
-  post("/api/action",d).then(function(r){
+  if(!pw()){needPw("Enter the current password first.");return}
+  post("/api/action",{a:"setpw",np:p,pw:pw()}).then(function(r){
     if(r&&r.err){banner(r.err,"bad");return}
-    localStorage.setItem("c32pw",p);$("npw").value="";banner("Password updated","go")})}
+    setPw(p);$("npw").value="";banner("Password updated","go")})
+   .catch(function(e){
+    if(e.code===401){needPw("Current password was not accepted.");return}
+    banner(e.message||"Failed","bad")})}
+var wipeArmed=false;
 function wipe(){
-  if(!confirm("Erase your character permanently? This cannot be undone."))return;
-  if(!confirm("Really wipe this device?"))return;
+  var b=$("wipebtn");
+  if(!wipeArmed){
+    wipeArmed=true;b.textContent="TAP AGAIN TO ERASE EVERYTHING";
+    setTimeout(function(){wipeArmed=false;b.textContent="FACTORY RESET"},5000);
+    return}
+  wipeArmed=false;b.textContent="FACTORY RESET";
   act("reset")}
 
 // ── rendering ──
@@ -407,6 +464,7 @@ function render(){
       (n.unread?' <span class="dot"></span>':'')+'</div><div>'+esc(n.msg)+'</div></div>'
     }).join(""):'<div class="xs mut">No messages yet.</div>';
 
+  $("pwstate").textContent=pw()?"password saved":"not set — actions will ask";
   $("cname").textContent=S.name;$("cfac").textContent=S.faction;
   $("cid").textContent=S.id;$("cver").textContent=S.version;
 

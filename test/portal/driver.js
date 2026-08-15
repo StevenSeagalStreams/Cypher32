@@ -45,6 +45,42 @@ ck(el("banner").className==="banner bad","timeout shows failure banner");
 ck(el("banner").textContent.includes("out of range"),"timeout explains why");
 
 S={...S1,sp:0}; render();
+// ── password flow: must work without prompt(), which the captive-portal
+// ── webview silently ignores ──
+S=S1; forgetPw(); render();
+ck(el("pwstate").textContent.indexOf("not set")>=0,"config shows password not set");
+// The shim does not parse markup, so seed the class the HTML starts with.
+el("pwmodal").className="modal hide";
+closePw();
+ck(el("pwmodal").className.indexOf("hide")>=0,"modal hidden at rest");
+act("beacon");
+ck(el("pwmodal").className==="modal","no password -> modal opens instead of prompt()");
+ck(el("pwerr").textContent.length>0,"modal explains why it opened");
+
+el("pwin").value="hunter2"; savePw();
+ck(pw()==="hunter2","password captured from the real input field");
+ck(el("pwmodal").className.indexOf("hide")>=0,"modal closes after unlock");
+render();
+ck(el("pwstate").textContent.indexOf("saved")>=0,"config shows password saved");
+
+// a 401 from the device must reopen the field, not dead-end
+forgetPw(); el("curpw").value="letmein"; unlockFromCfg();
+ck(pw()==="letmein","password can also be set from the Config tab");
+ck(el("curpw").value==="","field cleared after saving");
+
+// storage being unavailable must not break anything
+var realLS=globalThis.localStorage;
+globalThis.localStorage={getItem(){throw new Error("denied")},
+  setItem(){throw new Error("denied")},removeItem(){throw new Error("denied")}};
+setPw("x"); ck(pw()==="x","works when localStorage throws (private/restricted mode)");
+globalThis.localStorage=realLS;
+
+// factory reset needs two taps, since confirm() is unavailable
+wipeArmed=false; el("wipebtn").textContent="FACTORY RESET";
+wipe();
+ck(wipeArmed===true,"first tap arms the wipe");
+ck(el("wipebtn").textContent.indexOf("TAP AGAIN")>=0,"button asks for confirmation");
+
 console.log("\nhelpers: fmtLeft(7d)="+fmtLeft(604800000)+
             "  fmtLeft(11h22m)="+fmtLeft(40920000)+"  fmtAge(4.2s)="+fmtAge(4200));
 console.log(bad?`\n${bad} FAILURES`:"\nall portal render checks passed");
