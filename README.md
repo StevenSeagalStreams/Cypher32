@@ -215,7 +215,7 @@ All traffic runs at **868 MHz — SF7 — BW 125 kHz — CR 4/5 — sync 0x12**.
 
 | Packet | Type | Purpose |
 |--------|------|---------|
-| `BEACON` | broadcast | Pulse every 30 s — level and faction only |
+| `BEACON` | broadcast | Presence pulse — level and faction only |
 | `RECON_REQ` | unicast | Probe a target for one stat |
 | `RECON_REPLY` | unicast | Target returns one random stat |
 | `HACK_REQ` | unicast | Attack initiated — carries attacker's Brute |
@@ -225,12 +225,11 @@ All traffic runs at **868 MHz — SF7 — BW 125 kHz — CR 4/5 — sync 0x12**.
 | `ACK` | unicast | Link-layer acknowledgement |
 | `PING` | unicast | Reliable no-op — round-trip probe |
 
-Every frame carries a 4-byte HMAC tag keyed on a shared secret in
-`cypher32_packets.h`. **Change `LORA_KEY` before you deploy.** It is not real
-security — the key is compiled into every device — but it stops someone with a
-spare radio injecting packets to award themselves XP.
+All of it is defined in `cypher32_packets.h`.
 
-Defined in `cypher32_packets.h`.
+Beacons go out every 12–18 seconds while you're discovering, easing to 25–35
+seconds once the neighbourhood is known. The interval is jittered — a fixed
+cadence lets two devices lock into phase and collide on every single beacon.
 
 Every unicast carries a sequence number and is acknowledged. Unacknowledged
 frames are retried up to four times before the portal reports `NO RESPONSE` —
@@ -238,7 +237,13 @@ an action never just silently disappears. Duplicates are suppressed, replies are
 deferred so they don't collide with the requester re-arming its receiver, and the
 radio listens before transmitting.
 
-Diagnostics live at `192.168.4.1/api/diag`.
+Every frame also carries a 4-byte HMAC tag keyed on a shared secret.
+**Change `LORA_KEY` in `cypher32_packets.h` before you deploy.** It is not real
+security — the key is compiled into every device — but it stops someone with a
+spare radio injecting packets to award themselves XP.
+
+Airtime is metered against the EU 868 duty cycle limit and diagnostics live at
+`192.168.4.1/api/diag`.
 
 ---
 
