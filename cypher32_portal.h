@@ -65,7 +65,7 @@ textarea{min-height:64px;resize:none}
 .banner.go{display:block;background:#0d2418;color:#8dffb4;border-color:#2f6b47}
 .banner.bad{display:block;background:#2a1010;color:#ffb0b0;border-color:#8a3030}
 .banner.wait{display:block;background:#0f1c2a;color:#a8d4ff;border-color:#2f4f6b}
-.hide{display:none}
+.hide{display:none!important}
 .grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}
 .stat{background:#0a1013;border:1px solid #1d2f26;border-radius:8px;padding:10px;text-align:center}
 .stat b{display:block;font-size:19px;color:#7dffa8}
