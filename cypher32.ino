@@ -1127,6 +1127,16 @@ void displayLevelUp() {
   display.update();
 }
 
+// Shown while PRG is being held, so a factory reset is not silent.
+void displayWiping() {
+  displayRefreshes++;
+  display.clearMemory(); display.landscape();
+  printCenter(40, "FACTORY RESET");
+  printCenter(56, "KEEP HOLDING TO WIPE");
+  printCenter(72, "RELEASE TO CANCEL");
+  display.update();
+}
+
 void displaySetup() {
   display.clearMemory(); display.landscape();
   printCenter(MARGIN_Y, "CYPHER32 // SETUP REQUIRED");
@@ -1457,32 +1467,51 @@ void resolveHackVerdict() {
 //  The display counts down so you know it's working.
 //  Release before 5s to cancel with no changes.
 
-void checkFactoryReset() {
-  // GPIO0 = PRG/BTN-0 on Wireless Paper schematic.
-  // Active LOW (pulled to GND when pressed). Internal pull-up enabled.
-  // We deliberately avoid ALL display calls here — each display.update()
-  // blocks for ~2s and would eat the entire 5s window invisibly.
-  // Instead: hold 5s → silent wipe → reboot. No display feedback needed.
-
-  pinMode(PRG_PIN, INPUT_PULLUP);
-  delay(50);  // let pin settle after boot
-
-  if (digitalRead(PRG_PIN) == HIGH) return;  // not pressed
-
-  // Sample button continuously for RESET_HOLD_MS.
-  // If it goes HIGH at any point before the deadline → cancel.
-  unsigned long pressStart = millis();
-  while (millis() - pressStart < RESET_HOLD_MS) {
-    if (digitalRead(PRG_PIN) == HIGH) return;  // released — abort
-    delay(20);
-  }
-
-  // Still held after 5s — perform factory reset
+void wipeAndReboot() {
+  Serial.println("[FACTORY RESET] wiping NVS");
   preferences.begin("cypher-v8", false);
   preferences.clear();
   preferences.end();
-  delay(100);
+  delay(200);
   ESP.restart();
+}
+
+void initFactoryResetButton() {
+  // GPIO0 = PRG/BTN-0 on the Wireless Paper schematic, active LOW.
+  pinMode(PRG_PIN, INPUT_PULLUP);
+}
+
+// Hold PRG for 5 seconds *while the device is running* to wipe everything.
+//
+// This used to be a boot-time check at the top of setup(), which could never
+// work: GPIO0 held low during reset puts the ESP32-S3 into serial download
+// mode, so the sketch does not run at all. It has to be polled at runtime,
+// where GPIO0 is an ordinary input.
+//
+// This is also the only way back in if you forget the portal password, so it
+// deliberately needs no authentication — physically holding the button on the
+// device is the authentication.
+void serviceFactoryResetButton() {
+  static uint32_t heldSince = 0;
+  static bool     warned    = false;
+
+  if (digitalRead(PRG_PIN) == LOW) {
+    if (heldSince == 0) { heldSince = millis(); warned = false; return; }
+
+    // Tell the user it is working, once, about halfway through. The e-ink
+    // update blocks ~2 s; releasing during it simply cancels on the next poll.
+    if (!warned && (uint32_t)(millis() - heldSince) > 1500) {
+      warned = true;
+      displayWiping();
+    }
+    if ((uint32_t)(millis() - heldSince) >= RESET_HOLD_MS) wipeAndReboot();
+  } else {
+    if (heldSince != 0 && warned) {   // released before the deadline
+      lastIdleSig = 0xFFFFFFFF;
+      displayIdle();
+    }
+    heldSince = 0;
+  }
 }
 
 void setup() {
@@ -1504,7 +1533,7 @@ void setup() {
   analogReadResolution(12);
   display.landscape();
 
-  checkFactoryReset();
+  initFactoryResetButton();
   loadProgress();
 
   // Seed the PRNG before the radio comes up. Beacon jitter, CAD backoff and
@@ -1564,6 +1593,8 @@ void loop() {
   dnsServer.processNextRequest();
   server.handleClient();
   loraTick();
+  serviceFactoryResetButton();   // before the early return: must work even
+                                 // on an unconfigured or locked-out device
 
   if (myName == "" || myFaction == "NONE") return;
 

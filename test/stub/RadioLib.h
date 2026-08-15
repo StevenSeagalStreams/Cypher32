@@ -39,9 +39,11 @@ public:
   int      beginCalls   = 0;
   int      startRxCalls = 0;
 
+  void (*dio1Action)() = nullptr;
+
   int begin(float, float, int, int, uint8_t, int8_t, int) { beginCalls++; return RADIOLIB_ERR_NONE; }
-  void setDio1Action(void (*)()) {}
-  void clearDio1Action() {}
+  void setDio1Action(void (*f)()) { dio1Action = f; }
+  void clearDio1Action() { dio1Action = nullptr; }
   int  standby() { return RADIOLIB_ERR_NONE; }
 
   int startReceive() {
@@ -49,7 +51,13 @@ public:
     return failReceive ? -1 : RADIOLIB_ERR_NONE;
   }
 
-  int scanChannel() { return cadBusy ? RADIOLIB_LORA_DETECTED : RADIOLIB_CHANNEL_FREE; }
+  // The real SX1262 asserts DIO1 when the channel scan completes, which fires
+  // whatever handler is installed. Modelling that is what catches the TX
+  // truncation bug where a stale flag is mistaken for TxDone.
+  int scanChannel() {
+    if (dio1Action) dio1Action();
+    return cadBusy ? RADIOLIB_LORA_DETECTED : RADIOLIB_CHANNEL_FREE;
+  }
 
   int startTransmit(uint8_t* buf, size_t len) {
     if (failTransmit) return -1;

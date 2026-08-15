@@ -820,6 +820,14 @@ static void serviceTxQueue() {
   // Listen before transmit.
   radio.standby();
   int cad = radio.scanChannel();
+
+  // CAD asserts DIO1 when it finishes, and our shared handler is still armed,
+  // so the scan leaves loraDioFlag set. If we do not clear it here the very
+  // next loraTick() reads it as TxDone, calls finishTransmit() and re-arms RX
+  // while the packet is still going out — every frame gets truncated and
+  // nobody ever hears anybody. Clear it before arming the real transmission.
+  loraDioFlag = false;
+
   if (cad != RADIOLIB_CHANNEL_FREE) {
     loraCadBusy++;
     txq[idx].cadTries++;
@@ -832,6 +840,8 @@ static void serviceTxQueue() {
     LORA_LOG("CAD busy x%u — transmitting regardless", txq[idx].cadTries);
   }
 
+  // scanChannel() reconfigures DIO1 for CAD; put our handler back before TX.
+  radio.setDio1Action(loraDioISR);
   int st = radio.startTransmit(txq[idx].buf, txq[idx].len);
   if (st != RADIOLIB_ERR_NONE) {
     loraTxErrors++; loraLastTxError = st;

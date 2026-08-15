@@ -251,6 +251,21 @@ int main() {
     CHECK(loraTxErrors == 1,    "TX error counted");
   }
 
+  // ── CAD must not corrupt the TX state machine ──
+  printf("CAD / TxDone interaction\n");
+  {
+    resetAll();
+    loraSendBeacon();
+    loraTick();                 // CAD runs, DIO1 pulses, then startTransmit
+    CHECK(radioState == RS_TX, "transmission started after CAD");
+    CHECK(!loraDioFlag,        "CAD's DIO1 pulse cleared, not left pending");
+    loraTick();                 // must not mistake it for TxDone
+    CHECK(radioState == RS_TX, "still transmitting — frame not truncated");
+    CHECK(radio.sent.size() == 1, "exactly one frame on the air");
+    loraDioFlag = true; loraTick();          // the real TxDone
+    CHECK(radioState == RS_RX, "returns to RX on genuine TxDone");
+  }
+
   // ── T1.5 CAD ──
   printf("T1.5 channel activity detection\n");
   {
