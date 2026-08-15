@@ -345,9 +345,36 @@ function finish(){
   $("pwmsg").textContent="";
   setPw(a);
   banner("Configuring device…","wait",true);
-  post("/api/setup",{f:faction,p:a}).then(function(){
-    banner("Device configured. Rebooting…","go",true);
-    setTimeout(function(){location.reload()},6000)})}
+  post("/api/setup",{f:faction,p:a}).then(function(r){
+    // The device rejects bad input with an err field. Saying "configured"
+    // regardless — as this used to — hides the reason and drops you back at
+    // the start of the wizard with no idea why.
+    if(r&&r.err){$("pwmsg").textContent=r.err;banner(r.err,"bad");return}
+    awaitReboot();
+  }).catch(function(e){
+    // The device reboots as it replies, so a dropped connection here is the
+    // expected outcome, not a failure. Confirm by asking it, don't assume.
+    awaitReboot();
+  })}
+
+// Poll until the device comes back up and reports itself configured. Replaces
+// a blind 6-second reload that could not tell success from failure.
+function awaitReboot(){
+  banner("Device rebooting…","wait",true);
+  var tries=0;
+  var iv=setInterval(function(){
+    tries++;
+    if(tries>30){clearInterval(iv);
+      banner("Device did not come back. Check its screen, then reload.","bad");
+      return}
+    fetch("/api/state",{cache:"no-store"}).then(function(r){return r.json()})
+      .then(function(j){
+        if(j&&j.configured){
+          clearInterval(iv);
+          banner("Ready — "+j.name,"go");
+          setTimeout(function(){location.reload()},800)}
+      }).catch(function(){/* still down, keep waiting */})
+  },1000)}
 
 // ── transport ──
 function post(url,data){

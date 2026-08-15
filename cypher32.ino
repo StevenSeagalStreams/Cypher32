@@ -259,6 +259,13 @@ String hackPendingId = "";   // target of the hack currently awaiting a verdict
 #define WEEK_MS      604800000UL
 #define HALF_DAY_MS   43200000UL   // 12 hours hack retry cooldown
 
+// Rebooting from inside a request handler cuts the TCP connection before the
+// response has flushed, so the browser sees a reset instead of the reply and
+// cannot tell success from failure. Schedule it from loop() instead.
+bool     restartPending = false;
+uint32_t restartAtMs    = 0;
+void requestRestart(uint32_t inMs) { restartPending = true; restartAtMs = millis() + inMs; }
+
 // Set by any handler that put a transient screen up; loop() returns the
 // display to idle when it expires. Avoids blocking delay() in handlers.
 unsigned long revertIdleAtMs = 0;
@@ -1317,10 +1324,22 @@ static void apiOk(const String& msg) {
 // First-run only. Refuses once a character exists, so nobody on the open Wi-Fi
 // can re-roll somebody else's device.
 void handleApiSetup() {
-  if (!(myName == "" || myFaction == "NONE")) { apiFail(409, "Already configured"); return; }
   String f = server.arg("f"), p = server.arg("p");
-  if (f != "BLACK" && f != "WHITE" && f != "RED" && f != "GREEN") { apiFail(400, "Bad faction"); return; }
-  if (p.length() < 6) { apiFail(400, "Password too short"); return; }
+  Serial.printf("[SETUP] args=%d faction='%s' pwlen=%u method=%d\n",
+                server.args(), f.c_str(), (unsigned)p.length(), (int)server.method());
+
+  if (!(myName == "" || myFaction == "NONE")) {
+    Serial.println("[SETUP] refused — already configured");
+    apiFail(409, "Already configured — wipe the device first"); return;
+  }
+  if (f != "BLACK" && f != "WHITE" && f != "RED" && f != "GREEN") {
+    Serial.println("[SETUP] refused — faction missing or unrecognised");
+    apiFail(400, "Faction missing — did the form reach the device?"); return;
+  }
+  if (p.length() < 6) {
+    Serial.println("[SETUP] refused — password too short");
+    apiFail(400, "Password too short"); return;
+  }
 
   myFaction  = f;
   myPassword = p;
@@ -1330,9 +1349,10 @@ void handleApiSetup() {
   else if (f == "RED")   skillStealth  += 3;
   else { skillBrute++; skillStealth++; skillFirewall++; }
   saveProgress();
+  Serial.printf("[SETUP] configured as %s (%s) — rebooting\n",
+                myName.c_str(), myFaction.c_str());
   server.send(200, "application/json", "{\"ok\":true}");
-  delay(200);
-  ESP.restart();
+  requestRestart(800);   // let the response flush before we drop the link
 }
 
 // Every mutation goes through here, and every one needs the password. The AP is
@@ -1340,7 +1360,12 @@ void handleApiSetup() {
 // skill points or wipe your character.
 void handleApiAction() {
   if (myName == "" || myFaction == "NONE") { apiFail(409, "Not configured"); return; }
-  if (server.arg("pw") != myPassword)      { apiFail(401, "Wrong password");  return; }
+  if (server.arg("pw") != myPassword) {
+    Serial.printf("[AUTH] rejected '%s' — sent %u chars, stored %u\n",
+                  server.arg("a").c_str(),
+                  (unsigned)server.arg("pw").length(), (unsigned)myPassword.length());
+    apiFail(401, "Wrong password"); return;
+  }
 
   String a = server.arg("a");
 
@@ -1349,7 +1374,7 @@ void handleApiAction() {
                            apiOk("Node list cleared"); return; }
   if (a == "reset")      { server.send(200, "application/json", "{\"instant\":true,\"msg\":\"Wiping\"}");
                            preferences.begin("cypher-v8", false); preferences.clear(); preferences.end();
-                           delay(200); ESP.restart(); return; }
+                           requestRestart(800); return; }
   if (a == "setpw") {
     String np = server.arg("np");
     if (np.length() < 6) { apiFail(400, "Password too short"); return; }
@@ -1682,6 +1707,12 @@ void loop() {
   loraTick();
   serviceFactoryResetButton();   // before the early return: must work even
                                  // on an unconfigured or locked-out device
+
+  if (restartPending && (int32_t)(millis() - restartAtMs) >= 0) {
+    Serial.println("[SYS] restarting");
+    delay(50);
+    ESP.restart();
+  }
 
   if (myName == "" || myFaction == "NONE") return;
 
