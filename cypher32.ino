@@ -284,11 +284,30 @@ String getChipID() {
   return String(buf);
 }
 
+// Last raw reading, kept so /api/diag can show what the ADC actually saw
+// rather than only the number we derived from it.
+uint32_t battLastRaw = 0;
+uint32_t battLastMv  = 0;
+
 float getBatteryVoltage() {
   digitalWrite(ADC_CTRL, LOW); delay(10);
-  uint32_t raw = 0;
-  for (int i = 0; i < 15; i++) { raw += analogRead(BATTERY_PIN); delay(2); }
-  return ((raw / 15) / 4095.0) * 3.3 * 2.0;
+
+  // analogReadMilliVolts() applies the chip's factory eFuse calibration.
+  // The previous code scaled a raw analogRead() as if the ADC were linear
+  // across 0-3.3 V; the ESP32-S3 ADC is neither linear nor full-scale at
+  // 3.3 V, and it under-reads, which made a healthy cell look nearly flat.
+  // Heltec's own example for this board uses the calibrated call.
+  uint32_t mv = 0, raw = 0;
+  for (int i = 0; i < 15; i++) {
+    mv  += analogReadMilliVolts(BATTERY_PIN);
+    raw += analogRead(BATTERY_PIN);
+    delay(2);
+  }
+  battLastMv  = mv  / 15;
+  battLastRaw = raw / 15;
+
+  // On-board divider halves the cell voltage before it reaches the pin.
+  return (battLastMv * 2.0f) / 1000.0f;
 }
 
 // A LiPo actually powering this board cannot sit below ~3.0 V — the regulator
@@ -1280,6 +1299,9 @@ String buildStateJson() {
   j += "\"firewall\":"   + String(skillFirewall) + ",";
   j += "\"battery\":"    + String(getBatteryPercent()) + ",";
   j += "\"onUsb\":"      + String(batteryPresent() ? "false" : "true") + ",";
+  j += "\"battVolts\":"  + String(getBatteryVoltage(), 2) + ",";
+  j += "\"battMv\":"     + String(battLastMv) + ",";
+  j += "\"battRaw\":"    + String(battLastRaw) + ",";
 
   j += "\"lora\":{";
   j += "\"status\":\""   + jesc(loraStatus) + "\",";
@@ -1663,6 +1685,13 @@ void setup() {
   // they would back off in lockstep, which is the collision problem (D2) all
   // over again. Chip ID differs per device, so the sequences diverge.
   randomSeed(myChipID32 ^ micros());
+
+  {
+    float v = getBatteryVoltage();
+    Serial.printf("[BATT] raw=%lu mv=%lu -> %.2f V -> %d%% (%s)\n",
+                  (unsigned long)battLastRaw, (unsigned long)battLastMv, v,
+                  getBatteryPercent(), batteryPresent() ? "cell detected" : "no cell / USB");
+  }
 
   loraSetup();
 
