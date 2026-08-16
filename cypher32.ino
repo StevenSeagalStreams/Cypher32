@@ -210,37 +210,13 @@ const char* getScanBubble() {
 // ─────────────────────────────────────────────
 //  RANDOM HACKER NAME GENERATOR
 // ─────────────────────────────────────────────
-const char* namePrefixes[] = {
-  "Ghost","Void","Null","Iron","Zero","Dark",
-  "Neon","Byte","Hex","Root","Rogue","Shade",
-  "Flux","Nano","Grim","Echo","Venom","Pixel",
-  "Glitch","Surge","Blaze","Specter","Crypt","Nexus"
-};
-const int PREFIX_COUNT = 24;
+// Your hacker name is derived from your chip ID by nodeNameFromId() in
+// cypher32_packets.h — the same function every other device uses to name you.
+// There used to be a second, random generator here with its own copy of the
+// word lists, which is why the name on your screen never matched the name
+// your messages arrived under. One derivation, in the shared header, is the
+// only way the two can agree.
 
-const char* nameSuffixes[] = {
-  "Byte","Crypt","Shade","Hex","Wire","Core",
-  "Gate","Node","Shell","Mask","Spike","Bit",
-  "Link","Pulse","Slash","Probe","Trap","Worm",
-  "Key","Lock","Ping","Trace","Frag","Grid"
-};
-const int SUFFIX_COUNT = 24;
-
-String generateName() {
-  int pi = random(0, PREFIX_COUNT);
-  int si = random(0, SUFFIX_COUNT);
-  // avoid e.g. "CryptCrypt"
-  String pre = namePrefixes[pi];
-  String suf = nameSuffixes[si];
-  while (suf == pre) si = (si + 1) % SUFFIX_COUNT, suf = nameSuffixes[si];
-  String n = pre + suf;
-  if (n.length() > 10) n = n.substring(0, 10);
-  return n;
-}
-
-// ─────────────────────────────────────────────
-//  GAME STATE
-// ─────────────────────────────────────────────
 String myName      = "";
 String myPassword  = "";
 String myUniqueID  = "";
@@ -357,7 +333,22 @@ void loadProgress() {
   consecutiveLoss  = preferences.getInt("closs", 0);
   myUniqueID  = getChipID();
   // myChipID32 set at global init via makeChipID()
+
   preferences.end();
+
+  // Devices set up before the name was derived have a random one stored.
+  // Recompute it so they start matching what peers call them, without needing
+  // a wipe. An empty name still means "not configured". This runs after
+  // preferences.end() because saveProgress() opens its own handle.
+  if (myName != "") {
+    String derived = nodeNameFromId(myChipID32);
+    if (derived != myName) {
+      Serial.printf("[NAME] '%s' -> '%s' (now derived from chip ID)\n",
+                    myName.c_str(), derived.c_str());
+      myName = derived;
+      saveProgress();
+    }
+  }
 }
 
 // ── Cooldown lists (T4.4) ──────────────────────────────────────────────────
@@ -1343,7 +1334,7 @@ void handleApiSetup() {
 
   myFaction  = f;
   myPassword = p;
-  myName     = generateName();
+  myName     = nodeNameFromId(myChipID32);
   if      (f == "BLACK") skillBrute    += 3;
   else if (f == "WHITE") skillFirewall += 3;
   else if (f == "RED")   skillStealth  += 3;

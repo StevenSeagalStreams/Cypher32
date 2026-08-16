@@ -88,7 +88,13 @@ Hit **ESTABLISH UPLINK**. The device goes dark for a moment.
 
 ### Step 5 — You're in
 
-The firmware generates your **hacker name** from your chip ID — deterministic, permanent, the same name every time this specific device boots. No two devices share a name.
+The firmware derives your **hacker name** from your chip ID — deterministic and
+permanent, the same name every time this device boots. Crucially it is the
+*same* derivation every other device uses, so the name on your screen is the
+name your messages arrive under. Nothing about the name is ever transmitted.
+
+There are 576 possible names, so a collision between two devices is unlikely
+but not impossible once you have a few dozen in play.
 
 The display comes alive:
 

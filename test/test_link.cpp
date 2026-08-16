@@ -647,6 +647,33 @@ int main() {
     CHECK(!hackVerdictReady,  "and grants no verdict");
   }
 
+  // ── naming: one derivation, agreed by everyone ──
+  printf("node naming\n");
+  {
+    // A device's own name and the name its peers compute must come from the
+    // same function. They used to be two implementations — one random, one
+    // derived — so a message always arrived under the wrong name.
+    CHECK(nodeNameFromId(0xAAAA1111) == nodeNameFromId(0xAAAA1111),
+          "same chip id always yields the same name");
+    CHECK(!(nodeNameFromId(0xAAAA1111) == nodeNameFromId(0xBBBB2222)),
+          "different chip ids yield different names");
+
+    // Must be sane and display-safe across the whole id space.
+    int empty = 0, tooLong = 0;
+    uint32_t id = 1;
+    for (int i = 0; i < 4000; i++) {
+      id = id * 1664525u + 1013904223u;
+      String n = nodeNameFromId(id);
+      if (n.length() == 0)  empty++;
+      if (n.length() > 10)  tooLong++;
+    }
+    CHECK(empty == 0,   "never produces an empty name");
+    CHECK(tooLong == 0, "never exceeds the 10-char display budget");
+    printf("       (e.g. %08x -> %s, %08x -> %s)\n",
+           0xAAAA1111, nodeNameFromId(0xAAAA1111).c_str(),
+           0xBBBB2222, nodeNameFromId(0xBBBB2222).c_str());
+  }
+
   printf("\n%d checks, %d failures\n", checks, failures);
   return failures ? 1 : 0;
 }
