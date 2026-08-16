@@ -45,6 +45,12 @@ ck(el("banner").className==="banner bad","timeout shows failure banner");
 ck(el("banner").textContent.includes("out of range"),"timeout explains why");
 
 S={...S1,sp:0}; render();
+// battery: no cell attached must read as USB, not a fabricated 0%
+S={...S1,battery:-1,onUsb:true}; render();
+ck(el("hbat").textContent==="USB","no battery reads as USB, not 0%");
+S={...S1,battery:64,onUsb:false}; render();
+ck(el("hbat").textContent==="64%","a real battery still shows a percentage");
+
 // ── password flow: must work without prompt(), which the captive-portal
 // ── webview silently ignores ──
 S=S1; forgetPw(); render();

@@ -134,13 +134,14 @@ uint32_t myChipID32 = makeChipID();
 //   Hack fail     → -2
 //   Level up      → +3
 //   Long idle     → drifts toward 0 slowly
-//   Low battery   → -1
+//   Low battery   → -1, at most once per 5 min, real cell only
 //
 // Mood clamped to -4..+4. Mapped to face + bubble pool at render time.
 
 int  cyMood        = 0;    // -4=tilted, 0=chill, +4=proud/hyped
 int  consecutiveLoss = 0;  // track tilt
 int  consecutiveWin  = 0;
+unsigned long lastBattNudgeMs = 0;   // rate-limits the low-battery mood nudge
 unsigned long lastEventMs = 0;
 
 void shiftMood(int delta) {
@@ -157,8 +158,19 @@ void driftMood() {
     else if (cyMood < 0) cyMood++;
     lastEventMs = millis();
   }
-  // Low battery nudge
-  if (getBatteryPercent() < 20 && cyMood > -2) cyMood--;
+  // Low battery nudge.
+  //
+  // This used to run on every call — and driftMood() runs on every idle
+  // redraw — so as soon as the battery read low it drove the mood straight to
+  // -2 and held it there, which is exactly the "sad" bubble pool. Worse, a
+  // device on USB with no cell attached reads 0%, so it was permanently
+  // miserable for no reason. Nudge at most once per drift window, and only
+  // when there is a real battery to be low on.
+  if (batteryPresent() && getBatteryPercent() < 20 &&
+      (uint32_t)(millis() - lastBattNudgeMs) > 300000UL) {
+    lastBattNudgeMs = millis();
+    if (cyMood > -2) cyMood--;
+  }
 }
 
 // ── Face eyes by mood ─────────────────────────────────────────────────
@@ -279,8 +291,14 @@ float getBatteryVoltage() {
   return ((raw / 15) / 4095.0) * 3.3 * 2.0;
 }
 
+// A LiPo actually powering this board cannot sit below ~3.0 V — the regulator
+// would have cut out. A reading under that means there is no cell attached and
+// we are on USB, which is not the same thing as a flat battery.
+bool batteryPresent() { return getBatteryVoltage() > 3.0f; }
+
 int getBatteryPercent() {
   float v = getBatteryVoltage();
+  if (v <= 3.0f) return -1;    // no cell — running on USB
   if (v < 3.4)   return 0;
   if (v >= 4.15) return 100;
   return constrain((int)((v - 3.4) * 133), 0, 100);
@@ -1000,7 +1018,8 @@ void drawBubble(const char* msg) {
 void drawHeader() {
   String lvlStr = (myLevel >= MAX_LEVEL) ? "LVL:MAX" : "LVL:" + String(myLevel);
   String left  = myName + " [" + myFaction.substring(0, 1) + "] " + lvlStr;
-  String right = "BAT:" + String(getBatteryPercent()) + "%";
+  int bat = getBatteryPercent();
+  String right = (bat < 0) ? "USB" : "BAT:" + String(bat) + "%";
   printAt(MARGIN_X, MARGIN_Y, left);
   printRight(DISP_W - MARGIN_X, MARGIN_Y, right);
   drawSep(12);
@@ -1260,6 +1279,7 @@ String buildStateJson() {
   j += "\"stealth\":"    + String(skillStealth) + ",";
   j += "\"firewall\":"   + String(skillFirewall) + ",";
   j += "\"battery\":"    + String(getBatteryPercent()) + ",";
+  j += "\"onUsb\":"      + String(batteryPresent() ? "false" : "true") + ",";
 
   j += "\"lora\":{";
   j += "\"status\":\""   + jesc(loraStatus) + "\",";

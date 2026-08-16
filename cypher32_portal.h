@@ -440,7 +440,7 @@ function render(){
 
   $("hname").textContent=S.name;$("hlvl").textContent=S.level;
   $("hfac").textContent=S.faction;$("hfac").className="pill f"+S.faction.charAt(0);
-  $("hbat").textContent=S.battery+"%";
+  $("hbat").textContent=(S.onUsb||S.battery<0)?"USB":S.battery+"%";
   $("hlora").textContent=S.lora.status;
   $("hdot").className="dot"+(S.lora.ready?"":" off");
   $("hxp").textContent=S.xp+" / "+S.xpNext;
