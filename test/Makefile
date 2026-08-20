@@ -15,8 +15,8 @@ CXX      ?= g++
 CXXFLAGS := -std=c++17 -I stub -Wall -Wno-format
 BINS     := test_link test_twonode
 
-.PHONY: all run asan portal clean
-all: run portal
+.PHONY: all run asan portal lint clean
+all: lint run portal
 
 run: $(BINS)
 	@for b in $(BINS); do echo "── $$b ──"; ./$$b || exit 1; echo; done
@@ -24,6 +24,10 @@ run: $(BINS)
 asan: CXXFLAGS += -g -fsanitize=address,undefined
 asan: clean $(BINS)
 	@for b in $(BINS); do echo "── $$b (asan) ──"; ./$$b || exit 1; echo; done
+
+lint:
+	@echo "── sketch lint ──"
+	@python3 lint_sketch.py
 
 portal:
 	@echo "── portal ──"

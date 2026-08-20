@@ -550,6 +550,8 @@ HackResult resolveHackOutcome(String enemyFaction, int enemyFW, bool defenderSay
   return r;
 }
 
+#define MAX_LEVEL 32
+
 int xpForNextLevel() {
   return myLevel * 150;
 }
