@@ -330,7 +330,7 @@ int main() {
     resetAll();
     PktHackReq hq;
     mkHdr(&hq.hdr, PKT_HACK_REQ, 3, PKTFLAG_ACK_REQ, PEER, myChipID32);
-    hq.brute = 12; hq.recon_count = 2;
+    hq.brute = 12; hq.recon_count = 2; hq.stealth = 4;
     deliver(&hq, sizeof(hq));
     CHECK(pendingHackAlert,             "defender is notified of an inbound hack");
     CHECK(txqCountOfType(PKT_HACK_REPLY) == 1, "defender returns a verdict");
@@ -587,11 +587,27 @@ int main() {
   printf("T4.3 defender-authoritative hack\n");
   {
     // Odds must be identical on both sides, and bounded.
-    CHECK(loraHackChancePct(10, 0, 10) == 60, "base 60%");
-    CHECK(loraHackChancePct(10, 3, 10) == 75, "+5% per recon");
-    CHECK(loraHackChancePct(15, 0, 10) == 70, "+2% per point of brute over firewall");
-    CHECK(loraHackChancePct(0, 0, 35)  == 25, "floor 25%");
-    CHECK(loraHackChancePct(35, 3, 0)  == 90, "ceiling 90%");
+    //                       brute recon stealth firewall
+    CHECK(loraHackChancePct(10,   0,    0,      10) == 60, "base 60%");
+    CHECK(loraHackChancePct(10,   3,    0,      10) == 75, "+5% per recon");
+    CHECK(loraHackChancePct(15,   0,    0,      10) == 70, "+2% per brute over firewall");
+    CHECK(loraHackChancePct(10,   0,    8,      10) == 68, "+1% per point of stealth");
+    CHECK(loraHackChancePct(0,    0,    0,      35) == 25, "floor 25%");
+    CHECK(loraHackChancePct(35,   3,   35,       0) == 90, "ceiling 90%");
+
+    // Stealth must actually move the defender's roll — it used to feed only
+    // the attacker's own second roll, which nobody else could see.
+    CHECK(loraHackChancePct(5, 0, 0, 5) < loraHackChancePct(5, 0, 10, 5),
+          "stealth raises the odds");
+    // Firewall is subtracted from brute only, so stealth survives a firewall
+    // that has already wiped out the brute advantage.
+    CHECK(loraHackChancePct(5, 0, 10, 15) > loraHackChancePct(5, 0, 0, 15),
+          "stealth still counts once firewall has cancelled brute");
+    // ...but nothing lifts you off the 25% floor. Against a firewall that far
+    // ahead the floor is already charity, and stealth cannot buy more.
+    CHECK(loraHackChancePct(5, 0, 10, 30) == 25 &&
+          loraHackChancePct(5, 0,  0, 30) == 25,
+          "hopeless odds sit on the floor regardless of stealth");
   }
   {
     // Defender rolls and reports; attacker consumes the verdict.
@@ -605,6 +621,7 @@ int main() {
     CHECK(h->type == PKT_HACK_REQ,        "HACK_REQ on the wire");
     CHECK(sentReq->brute == skillBrute,   "carries attacker brute");
     CHECK(sentReq->recon_count == 2,      "carries attacker recon count");
+    CHECK(sentReq->stealth == skillStealth, "carries attacker stealth");
 
     PktHackReply rep;
     mkHdr(&rep.hdr, PKT_HACK_REPLY, 77, PKTFLAG_ACK_REQ, PEER, myChipID32);

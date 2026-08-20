@@ -165,7 +165,7 @@ One **Skill Point** per level-up. Spend it in the **Skills** tab. At high levels
 | Skill | Effect |
 |-------|--------|
 | **Brute Force** | Narrows the hack pool — raises hit probability per attempt |
-| **Stealth** | More attempts per roll — outlast their defenses |
+| **Stealth** | +1% hit chance per point — and Firewall can't cancel it |
 | **Firewall** | Cuts XP lost when counter-hacked — floor is 5 XP |
 
 Cap: **35** per skill (3 from faction + 32 earned through levels).
@@ -208,15 +208,23 @@ them how it went.
 Both cooldowns survive a reboot and survive the target walking out of range, so
 neither can be reset by power-cycling or waiting for them to drop off your radar.
 
-**Hit chance:**
+**Hit chance** — one roll, made on the defender's device:
 ```
 base 60%
-+ 5% per recon completed  (max +15%)
-+ 2% per point Brute Force over their Firewall
++ 5% per recon completed        (max +15%)
++ 2% per point of Brute Force over their Firewall
++ 1% per point of Stealth       (firewall cannot cancel this)
 floor: 25%   ceiling: 90%
 ```
 
-No guarantee. Never 100%.
+Brute is contested: it is measured against their Firewall, so it swings hard
+both ways and is the stat for cracking hard targets. Stealth is uncontested and
+worth half as much per point, but no Firewall can cancel it — the reliable
+investment. Recon is the lever you pull per target, and it also reveals your
+real odds before you commit.
+
+No guarantee. Never 100%. RED and GREEN carry their own backfire risks on top,
+so their effective win rate is lower than the number shown.
 
 ---
 

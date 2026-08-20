@@ -491,80 +491,64 @@ unsigned long hackCooldownLeft(String id) {
 //    RED:   attacks anyone; +25% XP vs GREEN; 15% chance XP loss even on success vs any
 //    GREEN: attacks anyone; +10% XP vs BLACK; 25% chance XP loss even on success vs WHITE
 
-HackResult resolveHack(String enemyFaction, int enemyFW) {
+// WHITE may only attack BLACK and RED. An unknown faction ('?') is allowed —
+// we simply have not heard their beacon yet, and refusing would be worse than
+// letting the attempt through.
+bool canAttackFaction(char defFaction) {
+  if (myFaction != "WHITE") return true;
+  return defFaction == 'B' || defFaction == 'R' || defFaction == '?';
+}
+
+// Turn the DEFENDER's verdict into XP and faction flavour.
+//
+// This used to roll its own dice on top of the defender's, and the caller then
+// forced success = true while keeping the losing branch's negative XP. The
+// result was a SYSTEM BREACHED screen that subtracted XP: over 90% of apparent
+// wins for a fresh character. There is exactly one roll for the outcome now,
+// and it happens on the defender where it cannot be forged.
+//
+// The only randomness left here is each faction's documented backfire, which
+// is a real reversal — it returns success = false and the caller honours it.
+HackResult resolveHackOutcome(String enemyFaction, int enemyFW, bool defenderSaysWon) {
   HackResult r;
 
-  // Faction gate: WHITE can only attack BLACK and RED
-  if (myFaction == "WHITE" && enemyFaction != "BLACK" && enemyFaction != "RED") {
-    r.success = false; r.xpDelta = 0; r.note = "Target immune!";
-    return r;
-  }
-
-  // Pool & attempts
-  int pool     = 50 + (enemyFW * 5) - (skillBrute * 4);
-  if (pool < 5) pool = 5;
-  int attempts = 4 + skillStealth;
-
-  // Roll
-  int secret = random(1, pool + 1);
-  bool hit   = false;
-  for (int i = 0; i < attempts && !hit; i++)
-    if (random(1, pool + 1) == secret) hit = true;
-
-  // Base values
-  int baseGain = 15 + (enemyFW * 5);   // reduced: max ~55 XP per hack
+  int baseGain = 15 + (enemyFW * 5);            // up to ~55 XP
   int baseLoss = 15 - (skillFirewall * 2);
   if (baseLoss < 5) baseLoss = 5;
 
-  if (hit) {
-    r.success = true;
-    r.xpDelta = baseGain;
-
-    if (myFaction == "BLACK") {
-      r.xpDelta = (int)(baseGain * 1.2);
-      r.note    = "XP stolen! +20%";
-    } else if (myFaction == "RED") {
-      if (random(100) < 15) {
-        r.success = false; r.xpDelta = -baseLoss; r.note = "Traced! Lose XP.";
-      } else if (enemyFaction == "GREEN") {
-        r.xpDelta = (int)(baseGain * 1.25); r.note = "Easy target! +25%";
-      } else {
-        r.note = "Hack success.";
-      }
-    } else if (myFaction == "GREEN") {
-      if (enemyFaction == "WHITE" && random(100) < 25) {
-        r.success = false; r.xpDelta = -baseLoss; r.note = "Firewall bit back!";
-      } else if (enemyFaction == "BLACK") {
-        r.xpDelta = (int)(baseGain * 1.10); r.note = "+10% vs Black Hat";
-      } else {
-        r.note = "Hack success.";
-      }
-    } else {
-      r.note = "Node secured.";
-    }
-  } else {
+  if (!defenderSaysWon) {
     r.success = false;
-    if (myFaction == "BLACK") {
-      r.xpDelta = -15; r.note = "Exposed! Full loss.";  // no FW reduction for Black
+    if (myFaction == "BLACK") { r.xpDelta = -15;       r.note = "Exposed! Full loss."; }
+    else                      { r.xpDelta = -baseLoss; r.note = "Counter-hacked."; }
+    return r;
+  }
+
+  r.success = true;
+  r.xpDelta = baseGain;
+  r.note    = "Node secured.";
+
+  if (myFaction == "BLACK") {
+    r.xpDelta = (int)(baseGain * 1.2);
+    r.note    = "XP stolen! +20%";
+  } else if (myFaction == "RED") {
+    if (random(100) < 15) {                     // traced on the way out
+      r.success = false; r.xpDelta = -baseLoss; r.note = "Traced! Lose XP.";
+    } else if (enemyFaction == "GREEN") {
+      r.xpDelta = (int)(baseGain * 1.25); r.note = "Easy target! +25%";
     } else {
-      r.xpDelta = -baseLoss; r.note = "Counter-hacked.";
+      r.note = "Hack success.";
+    }
+  } else if (myFaction == "GREEN") {
+    if (enemyFaction == "WHITE" && random(100) < 25) {
+      r.success = false; r.xpDelta = -baseLoss; r.note = "Firewall bit back!";
+    } else if (enemyFaction == "BLACK") {
+      r.xpDelta = (int)(baseGain * 1.10); r.note = "+10% vs Black Hat";
+    } else {
+      r.note = "Hack success.";
     }
   }
   return r;
 }
-
-// ─────────────────────────────────────────────
-//  LEVEL & XP SYSTEM
-// ─────────────────────────────────────────────
-// Max level: 32  (Cypher32!)
-// XP to next level = currentLevel * 150
-//   LVL 1→2:  150 XP
-//   LVL 5→6:  750 XP
-//   LVL 16→17: 2400 XP
-//   LVL 31→32: 4650 XP
-// XP per successful hack: 15 + enemyFW * 5  (max ~55 at FW=8)
-// This means even at low level you need several hacks per level.
-#define MAX_LEVEL 32
 
 int xpForNextLevel() {
   return myLevel * 150;
@@ -1344,6 +1328,15 @@ String buildStateJson() {
     j += "\"recon\":"       + String(n->recon_count) + ",";
     j += "\"hackWon\":"     + String(recentlyHacked(nid) ? "true" : "false") + ",";
     j += "\"cooldownMs\":"  + String(hackCooldownLeft(nid)) + ",";
+    j += "\"canHack\":"     + String(canAttackFaction(n->faction) ? "true" : "false") + ",";
+    // Real odds, but only once recon has actually revealed their firewall.
+    // Guessing a number here would be worse than admitting we do not know:
+    // finding out is what recon is for.
+    int fwKnown = -1;
+    for (int k = 0; k < n->recon_count; k++)
+      if (n->recon_types[k] == STAT_FIREWALL) fwKnown = n->recon_values[k];
+    j += "\"odds\":" + String(fwKnown < 0 ? -1
+           : loraHackChancePct(skillBrute, n->recon_count, skillStealth, fwKnown)) + ",";
     j += "\"unread\":"      + String(n->msg_unread ? "true" : "false") + ",";
     j += "\"msg\":\""       + jesc(String(n->msg_inbox)) + "\"";
     j += "}";
@@ -1450,6 +1443,12 @@ void handleApiAction() {
   if (a == "hack") {
     String nid = chipIdStr(target);
     if (hackInFlight)         { apiFail(429, "A hack is already running"); return; }
+    // Refuse immune targets here. This used to be checked only when XP was
+    // worked out, by which point the defender had already rolled and the node
+    // had been locked for 7 days for a hack worth nothing.
+    if (!canAttackFaction(n->faction)) {
+      apiFail(400, "WHITE can only attack BLACK and RED"); return;
+    }
     if (recentlyHacked(nid))  { apiFail(400, "Already owned — locked for 7 days"); return; }
     if (recentlyFailed(nid))  { apiFail(400, "Locked out — try again later"); return; }
     if (loraActionPending())  { apiFail(429, "Another action in flight"); return; }
@@ -1518,32 +1517,32 @@ void resolveHackVerdict() {
   else if (hackVerdictFaction=='R') enemyFaction="RED";
   else if (hackVerdictFaction=='G') enemyFaction="GREEN";
 
-  HackResult result;
-  if (won) {
-    result = resolveHack(enemyFaction, enemyFW);
-    result.success = true;
-  } else {
-    result.success = false;
-    result.xpDelta = -(15 - min(10, skillFirewall*2));
-    if (result.xpDelta > -5) result.xpDelta = -5;
-    result.note = "Counter-hack detected.";
-  }
+  // A faction backfire can turn the defender's "you got in" into a loss, so
+  // the effective outcome is what resolveHackOutcome() reports — not `won`.
+  HackResult result = resolveHackOutcome(enemyFaction, enemyFW, won);
+  bool effectiveWin = result.success;
 
   KnownNode* n = findNode(target);
   if (n) {
     n->hack_attempted = true;
-    n->hack_won       = won;
+    n->hack_won       = effectiveWin;
     n->hack_time_ms   = millis();
   }
 
   // Confirm to the defender, carrying our XP delta. They already know the
   // outcome — they decided it — so this is a report, not the notification.
-  if (loraReady) loraSendHackResult(target, won, (int8_t)constrain(result.xpDelta, -128, 127));
+  if (loraReady) loraSendHackResult(target, effectiveWin,
+                                    (int8_t)constrain(result.xpDelta, -128, 127));
 
-  shiftMood(won ? +2 : -2, won ? "won a hack" : "lost a hack");
+  Serial.printf("[HACK] %s vs %s fw=%d -> defender said %s -> %s, XP %+d (%s)\n",
+                myFaction.c_str(), enemyFaction.c_str(), enemyFW,
+                won ? "WIN" : "HELD", effectiveWin ? "WIN" : "LOSS",
+                result.xpDelta, result.note.c_str());
+
+  shiftMood(effectiveWin ? +2 : -2, effectiveWin ? "won a hack" : "lost a hack");
 
   bool lvlUp = false;
-  if (won) {
+  if (effectiveWin) {
     recordHack(nid);                       // 7-day lock
     displayHackSuccess(nid, result.xpDelta, result.note);
     lvlUp = applyXP(result.xpDelta);

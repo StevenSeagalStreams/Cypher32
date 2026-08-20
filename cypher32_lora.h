@@ -500,8 +500,21 @@ void loraSendMsg(uint32_t target_id, const char* text) {
 
 // One implementation of the odds, used by both sides so the defender's roll
 // matches what the attacker's UI predicted.
-int loraHackChancePct(int attackerBrute, int attackerRecon, int defenderFirewall) {
-  int pct = 60 + attackerRecon * 5 + (attackerBrute - defenderFirewall) * 2;
+//
+// Brute is contested — it is measured against the defender's firewall, so it
+// swings hard both ways and is the stat for cracking hard targets. Stealth is
+// uncontested and worth half as much per point, but firewall can never cancel
+// it, which makes it the reliable investment. Recon is the tactical lever you
+// pull per target.
+//
+// Stealth used to feed only the attacker's own second roll, which the defender
+// never saw, so it had no bearing on whether a hack landed at all.
+int loraHackChancePct(int attackerBrute, int attackerRecon,
+                      int attackerStealth, int defenderFirewall) {
+  int pct = 60
+          + attackerRecon * 5
+          + (attackerBrute - defenderFirewall) * 2
+          + attackerStealth;
   if (pct < 25) pct = 25;
   if (pct > 90) pct = 90;
   return pct;
@@ -513,6 +526,7 @@ void loraHackStart(uint32_t target_id, int reconCount) {
   fillHdr(&pkt.hdr, PKT_HACK_REQ, target_id);
   pkt.brute       = (uint8_t)skillBrute;
   pkt.recon_count = (uint8_t)reconCount;
+  pkt.stealth     = (uint8_t)skillStealth;
   hackInFlight     = true;
   hackTargetId     = target_id;
   hackVerdictReady = false;
@@ -672,7 +686,8 @@ void loraHandlePacket(uint8_t* buf, int len) {
       PktHackReq* p = (PktHackReq*)buf;
 
       // T4.3 — the defender rolls. The attacker only supplies its own stats.
-      int  pct          = loraHackChancePct(p->brute, p->recon_count, skillFirewall);
+      int  pct          = loraHackChancePct(p->brute, p->recon_count,
+                                            p->stealth, skillFirewall);
       bool attackerWins = (random(0, 100) < pct);
 
       PktHackReply reply;
@@ -683,8 +698,8 @@ void loraHandlePacket(uint8_t* buf, int len) {
       deferReply(&reply, sizeof(reply));
       touchNode(hdr->from_id);
 
-      LORA_LOG("HACK from %08lx brute=%u recon=%u vs fw=%d -> %d%% -> %s",
-               (unsigned long)hdr->from_id, p->brute, p->recon_count,
+      LORA_LOG("HACK from %08lx brute=%u stealth=%u recon=%u vs fw=%d -> %d%% -> %s",
+               (unsigned long)hdr->from_id, p->brute, p->stealth, p->recon_count,
                skillFirewall, pct, attackerWins ? "THEY WIN" : "HELD");
 
       // Alert here rather than on HACK_RESULT: a modified attacker can decline

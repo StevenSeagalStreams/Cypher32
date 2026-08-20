@@ -210,10 +210,10 @@ textarea{min-height:64px;resize:none}
         <p class="xs mut">You earn one point per level. Maximum 35 per skill.</p>
       </div>
       <div class="card"><div class="row"><b>BRUTE FORCE</b><span id="kbr">0</span></div>
-        <p class="xs mut">Raises your chance on every hack attempt.</p>
+        <p class="xs mut">+2% hit chance per point over the target's Firewall &mdash; big swings against soft targets.</p>
         <button class="sk" data-s="brute" onclick="act('skill',{s:'brute'})">+1 BRUTE</button></div>
       <div class="card"><div class="row"><b>STEALTH</b><span id="kst">0</span></div>
-        <p class="xs mut">More attempts per hack roll.</p>
+        <p class="xs mut">+1% hit chance per point. Unlike Brute Force, a target's Firewall cannot cancel it.</p>
         <button class="sk" data-s="stealth" onclick="act('skill',{s:'stealth'})">+1 STEALTH</button></div>
       <div class="card"><div class="row"><b>FIREWALL</b><span id="kfw">0</span></div>
         <p class="xs mut">Cuts the XP you lose when someone hacks you.</p>
@@ -471,12 +471,15 @@ function render(){
         '<span>'+bars(n.bars)+' '+esc(n.proximity)+'</span>'+
         '<span>'+fmtAge(n.ageMs)+'</span></div>'+
       '<div class="row" style="margin-top:8px">'+
-        '<span class="xs mut">Recon <span class="pips">'+pips+'</span></span>'+
+        '<span class="xs mut">Recon <span class="pips">'+pips+'</span>'+
+          (n.odds>=0?' &middot; odds '+n.odds+'%':' &middot; odds unknown')+'</span>'+
         (lock?'<span class="xs mut">'+lock+'</span>':'')+'</div>'+
+      (n.canHack===false?'<div class="xs mut" style="margin-top:6px">'+
+        'Immune &mdash; WHITE can only attack BLACK and RED.</div>':'')+
       '<div class="row" style="margin-top:10px;gap:8px">'+
         '<button class="btn inline ghost" '+(n.recon>=3?"disabled":"")+
           ' onclick="act(\'recon\',{id:\''+n.id+'\'})">RECON</button>'+
-        '<button class="btn inline" '+(cd?"disabled":"")+
+        '<button class="btn inline" '+((cd||n.canHack===false)?"disabled":"")+
           ' onclick="act(\'hack\',{id:\''+n.id+'\'})">HACK</button>'+
       '</div></div>'}).join("");
 

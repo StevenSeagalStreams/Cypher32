@@ -112,6 +112,7 @@ struct PktHackReq {
   PktHeader hdr;         // type=PKT_HACK_REQ
   uint8_t   brute;       // attacker's brute force stat
   uint8_t   recon_count; // how much recon the attacker did (0-3)
+  uint8_t   stealth;     // attacker's stealth stat — see loraHackChancePct()
 };
 
 // T4.3: the defender rolls and reports the verdict, so a modified attacker
