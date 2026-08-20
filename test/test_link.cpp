@@ -330,7 +330,7 @@ int main() {
     resetAll();
     PktHackReq hq;
     mkHdr(&hq.hdr, PKT_HACK_REQ, 3, PKTFLAG_ACK_REQ, PEER, myChipID32);
-    hq.brute = 12; hq.recon_count = 2; hq.stealth = 4;
+    hq.brute = 12; hq.recon_score = 7; hq.stealth = 4;
     deliver(&hq, sizeof(hq));
     CHECK(pendingHackAlert,             "defender is notified of an inbound hack");
     CHECK(txqCountOfType(PKT_HACK_REPLY) == 1, "defender returns a verdict");
@@ -586,10 +586,30 @@ int main() {
 
   printf("T4.3 defender-authoritative hack\n");
   {
+    // An attacker reports its own recon score, so the defender must clamp it.
+    resetAll();
+    PktHackReq hq;
+    mkHdr(&hq.hdr, PKT_HACK_REQ, 3, PKTFLAG_ACK_REQ, PEER, myChipID32);
+    hq.brute = 0; hq.stealth = 0; hq.recon_score = 250;   // absurd claim
+    deliver(&hq, sizeof(hq));
+    CHECK(txqCountOfType(PKT_HACK_REPLY) == 1, "still answered");
+    // 60 + clamp(250)->10 *15/10 + (0-fw)*2 ... the point is it cannot exceed
+    // what a perfect honest run would give.
+    CHECK(loraHackChancePct(0, 250, 0, skillFirewall) ==
+          loraHackChancePct(0, RECON_MAX_SEQ, 0, skillFirewall),
+          "a forged recon score is worth no more than a perfect run");
+  }
+  {
     // Odds must be identical on both sides, and bounded.
-    //                       brute recon stealth firewall
+    //                       brute seq  stealth firewall
     CHECK(loraHackChancePct(10,   0,    0,      10) == 60, "base 60%");
-    CHECK(loraHackChancePct(10,   3,    0,      10) == 75, "+5% per recon");
+    // A perfect sequence run is worth what three button-press recons used to
+    // be, so the ceiling of the recon term is unchanged at +15.
+    CHECK(loraHackChancePct(10, RECON_MAX_SEQ, 0, 10) == 75,
+          "perfect recon sequence gives exactly 75%");
+    CHECK(loraHackChancePct(10,   5,    0,      10) == 67, "half a run, half the bonus");
+    CHECK(loraHackChancePct(10, 999,    0,      10) == 75, "an inflated score is clamped");
+    CHECK(loraHackChancePct(10,  -4,    0,      10) == 60, "a negative score is clamped");
     CHECK(loraHackChancePct(15,   0,    0,      10) == 70, "+2% per brute over firewall");
     CHECK(loraHackChancePct(10,   0,    8,      10) == 68, "+1% per point of stealth");
     CHECK(loraHackChancePct(0,    0,    0,      35) == 25, "floor 25%");
@@ -612,7 +632,7 @@ int main() {
   {
     // Defender rolls and reports; attacker consumes the verdict.
     resetAll();
-    loraHackStart(PEER, 2);
+    loraHackStart(PEER, 6);
     CHECK(hackInFlight,                     "hack marked in flight");
     CHECK(pendingUser.type == PKT_HACK_REQ, "HACK_REQ sent reliably");
     run(30);
@@ -620,7 +640,7 @@ int main() {
     PktHackReq* sentReq = (PktHackReq*)radio.sent[0].data.data();
     CHECK(h->type == PKT_HACK_REQ,        "HACK_REQ on the wire");
     CHECK(sentReq->brute == skillBrute,   "carries attacker brute");
-    CHECK(sentReq->recon_count == 2,      "carries attacker recon count");
+    CHECK(sentReq->recon_score == 6,      "carries the recon sequence score");
     CHECK(sentReq->stealth == skillStealth, "carries attacker stealth");
 
     PktHackReply rep;

@@ -43,6 +43,17 @@
 #define PKTFLAG_ACK_REQ 0x01  // sender wants an ACK for this seq
 #define PKTFLAG_IS_ACK  0x02  // this frame *is* an ACK; seq = acked seq
 
+// ── Recon mini-game (sequence memory) ────────
+//  Recon is played on the phone: a sequence of tiles flashes and you repeat
+//  it, one longer each round. The furthest round you complete is your recon
+//  score for that node.
+//
+//  A perfect run is worth exactly what three button-presses used to be, so
+//  the odds curve is unchanged — it just has to be earned now.
+//      score 10  ->  +15%  ->  75% base hit chance
+#define RECON_MAX_SEQ    10   // longest sequence the mini-game runs to
+#define RECON_MAX_BONUS  15   // odds bonus for a perfect run
+
 // ── Recon stat types ─────────────────────────
 #define STAT_BRUTE    0x01
 #define STAT_STEALTH  0x02
@@ -111,7 +122,8 @@ struct PktReconReply {
 struct PktHackReq {
   PktHeader hdr;         // type=PKT_HACK_REQ
   uint8_t   brute;       // attacker's brute force stat
-  uint8_t   recon_count; // how much recon the attacker did (0-3)
+  uint8_t   recon_score; // best sequence reached against this node (0-10).
+                         // The defender clamps it — see loraHandlePacket().
   uint8_t   stealth;     // attacker's stealth stat — see loraHackChancePct()
 };
 
@@ -170,6 +182,7 @@ struct KnownNode {
   uint8_t       recon_count;         // how many recons done (0-3)
   uint8_t       recon_types[3];      // STAT_BRUTE/STEALTH/FIREWALL
   uint8_t       recon_values[3];     // revealed values
+  uint8_t       recon_score;         // best sequence reached here (0-10)
 
   // Hack state — manual, one attempt only
   bool          hack_attempted;

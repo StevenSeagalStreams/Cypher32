@@ -87,6 +87,55 @@ wipe();
 ck(wipeArmed===true,"first tap arms the wipe");
 ck(el("wipebtn").textContent.indexOf("TAP AGAIN")>=0,"button asks for confirmation");
 
+// ── recon mini-game ──
+// The odds contribution must match the firmware: score/max * 15.
+seqOpen("beef0001","VoidCrypt",10);
+ck(el("seqgrid").children.length===9,"3x3 grid built");
+ck(el("seqmax").textContent==="10","target sequence length shown");
+ck(el("seqmodal").className==="modal","mini-game opens on RECON");
+
+// play it honestly: read the generated sequence and repeat it
+seqBegin();
+flushTimers(80);                       // let round 1 finish flashing
+ck(seqOrder.length===1,"round 1 is one tile");
+var reached=0;
+for(var round=0;round<10;round++){
+  if(!seqAccepting)flushTimers(80);
+  if(!seqAccepting)break;
+  var target=seqOrder.slice();
+  for(var k=0;k<target.length;k++)seqTap(target[k]);
+  reached=target.length;
+  if(reached>=10)break;
+  flushTimers(80);
+}
+ck(reached===10,"a perfect run reaches 10, got "+reached);
+ck(seqBest===10,"score recorded as 10");
+ck(el("seqmsg").textContent.indexOf("+15%")>=0,
+   "perfect run advertises the +15% bonus, got: "+el("seqmsg").textContent);
+
+// The bonus the portal advertises must match what the firmware awards.
+// Firmware: (score * RECON_MAX_BONUS) / RECON_MAX_SEQ, integer division.
+// test_link.cpp asserts the same table from the C++ side (60 / 67 / 75).
+[[0,0],[5,7],[10,15]].forEach(function(pair){
+  ck(Math.floor(pair[0]*15/10)===pair[1],
+     "bonus for sequence "+pair[0]+" is +"+pair[1]+"%");
+});
+
+// a wrong tile ends the run at the last completed round
+seqOpen("beef0002","NullGate",10);
+seqBegin(); flushTimers(80);
+var wrong=(seqOrder[0]+1)%9;
+seqTap(wrong);
+ck(seqBest===0,"failing round 1 scores 0");
+ck(el("seqmsg").textContent.indexOf("Wrong tile")>=0,"failure is explained");
+
+seqOpen("beef0003","IronCore",10);
+seqBegin(); flushTimers(80);
+seqTap(seqOrder[0]);                    // clear round 1
+flushTimers(80);
+if(seqAccepting){ seqTap((seqOrder[0]+1)%9); }   // fail round 2
+ck(seqBest===1,"failing round 2 keeps the score from round 1, got "+seqBest);
+
 console.log("\nhelpers: fmtLeft(7d)="+fmtLeft(604800000)+
             "  fmtLeft(11h22m)="+fmtLeft(40920000)+"  fmtAge(4.2s)="+fmtAge(4200));
 console.log(bad?`\n${bad} FAILURES`:"\nall portal render checks passed");

@@ -81,6 +81,14 @@ textarea{min-height:64px;resize:none}
 .modal{position:fixed;inset:0;background:#000c;z-index:200;display:flex;align-items:center;
  justify-content:center;padding:16px}
 .modal .card{max-width:380px;width:100%;margin:0}
+.seq{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:12px 0}
+.seq div{aspect-ratio:1;border:1px solid #24402f;border-radius:10px;background:#0a1013;
+ cursor:pointer;transition:background .08s,border-color .08s}
+.seq div.lit{background:#7dffa8;border-color:#7dffa8}
+.seq div.bad{background:#ff8080;border-color:#ff8080}
+.seq.locked div{cursor:default}
+.seqhead{display:flex;justify-content:space-between;align-items:baseline}
+.seqhead b{font-size:22px;color:#7dffa8}
 </style></head><body>
 <div id="banner" class="banner"></div>
 
@@ -96,6 +104,20 @@ textarea{min-height:64px;resize:none}
     <button class="btn ghost" onclick="closePw()">Cancel</button>
     <p class="xs mut" style="margin-bottom:0">Forgotten it? On the device: tap
     <b>RST</b> twice, then hold <b>PRG</b> for 5 seconds to wipe and start over.</p>
+  </div>
+</div>
+
+<!-- Recon mini-game: sequence memory. Watch, then repeat. -->
+<div id="seqmodal" class="modal hide">
+  <div class="card">
+    <div class="seqhead"><div class="ct" style="margin:0">Recon &mdash; <span id="seqtarget">?</span></div>
+      <b id="seqlen">0</b></div>
+    <div class="xs mut" id="seqmsg">Watch the sequence, then repeat it.</div>
+    <div class="seq" id="seqgrid"></div>
+    <div class="xs mut">Each round adds one step. Reach <b id="seqmax">10</b> for the
+    full <b>+15%</b> hack bonus. Your best run against this node is kept.</div>
+    <button id="seqbtn" onclick="seqBegin()">START</button>
+    <button class="btn ghost" onclick="seqQuit()">Cancel</button>
   </div>
 </div>
 
@@ -423,6 +445,97 @@ function wipe(){
   wipeArmed=false;b.textContent="FACTORY RESET";
   act("reset")}
 
+// ── recon mini-game (sequence memory) ──
+//
+// Round n flashes n tiles; repeat them to advance. The furthest round you
+// complete is the score, and it is sent with the recon action. Deliberately
+// forgiving on the first rounds and unforgiving after: one wrong tile ends it,
+// which is what makes a long run worth something.
+var seqTarget="",seqOrder=[],seqAt=0,seqBest=0,seqPlaying=false,seqAccepting=false;
+var SEQ_MAX=10;
+
+function seqOpen(id,name,max){
+  seqTarget=id; SEQ_MAX=max||10;
+  seqOrder=[];seqAt=0;seqBest=0;seqPlaying=false;seqAccepting=false;
+  $("seqtarget").textContent=name;
+  $("seqmax").textContent=String(SEQ_MAX);
+  $("seqlen").textContent="0";
+  $("seqmsg").textContent="Watch the sequence, then repeat it.";
+  $("seqbtn").textContent="START";$("seqbtn").disabled=false;
+  var g=$("seqgrid");g.className="seq";g.innerHTML="";
+  for(var i=0;i<9;i++){
+    var d=document.createElement("div");
+    d.dataset.i=String(i);
+    d.onclick=(function(k){return function(){seqTap(k)}})(i);
+    g.appendChild(d);
+  }
+  $("seqmodal").className="modal";
+}
+function seqQuit(){seqPlaying=false;seqAccepting=false;$("seqmodal").className="modal hide"}
+
+function seqTiles(){return $("seqgrid").children}
+function seqFlash(i,cls,ms){
+  var t=seqTiles()[i]; if(!t)return;
+  t.className=cls||"lit";
+  setTimeout(function(){t.className=""},ms||300);
+}
+
+function seqBegin(){
+  if(seqPlaying)return;
+  seqPlaying=true;$("seqbtn").disabled=true;
+  seqOrder=[];seqBest=0;
+  seqNextRound();
+}
+function seqNextRound(){
+  seqAccepting=false;
+  seqOrder.push(Math.floor(Math.random()*9));
+  $("seqlen").textContent=String(seqOrder.length);
+  $("seqmsg").textContent="Watch…";
+  $("seqgrid").className="seq locked";
+  var i=0;
+  var iv=setInterval(function(){
+    if(i>=seqOrder.length){
+      clearInterval(iv);
+      seqAccepting=true;seqAt=0;
+      $("seqgrid").className="seq";
+      $("seqmsg").textContent="Your turn — repeat it.";
+      return;
+    }
+    seqFlash(seqOrder[i],"lit",320);
+    i++;
+  },520);
+}
+function seqTap(i){
+  if(!seqAccepting)return;
+  if(i!==seqOrder[seqAt]){ seqFail(i); return; }
+  seqFlash(i,"lit",160);
+  seqAt++;
+  if(seqAt>=seqOrder.length){
+    seqAccepting=false;
+    seqBest=seqOrder.length;
+    if(seqBest>=SEQ_MAX){ seqDone("Perfect run."); return; }
+    $("seqmsg").textContent="Correct — next round.";
+    setTimeout(seqNextRound,700);
+  }
+}
+function seqFail(i){
+  seqAccepting=false;seqPlaying=false;
+  seqFlash(i,"bad",500);
+  seqDone("Wrong tile.");
+}
+function seqDone(why){
+  seqPlaying=false;seqAccepting=false;
+  $("seqgrid").className="seq locked";
+  var bonus=Math.floor(seqBest*15/SEQ_MAX);
+  $("seqmsg").textContent=why+" Sequence "+seqBest+" — +"+bonus+"% hack odds.";
+  $("seqbtn").textContent="SENDING RECON…";$("seqbtn").disabled=true;
+  var id=seqTarget;
+  setTimeout(function(){
+    $("seqmodal").className="modal hide";
+    act("recon",{id:id,score:seqBest});
+  },1400);
+}
+
 // ── rendering ──
 function fmtAge(ms){var s=Math.floor(ms/1000);
   if(s<60)return s+"s ago";if(s<3600)return Math.floor(s/60)+"m ago";
@@ -472,13 +585,14 @@ function render(){
         '<span>'+fmtAge(n.ageMs)+'</span></div>'+
       '<div class="row" style="margin-top:8px">'+
         '<span class="xs mut">Recon <span class="pips">'+pips+'</span>'+
+          ' &middot; seq '+(n.reconScore||0)+'/'+(n.reconMax||10)+
           (n.odds>=0?' &middot; odds '+n.odds+'%':' &middot; odds unknown')+'</span>'+
         (lock?'<span class="xs mut">'+lock+'</span>':'')+'</div>'+
       (n.canHack===false?'<div class="xs mut" style="margin-top:6px">'+
         'Immune &mdash; WHITE can only attack BLACK and RED.</div>':'')+
       '<div class="row" style="margin-top:10px;gap:8px">'+
         '<button class="btn inline ghost" '+(n.recon>=3?"disabled":"")+
-          ' onclick="act(\'recon\',{id:\''+n.id+'\'})">RECON</button>'+
+          ' onclick="seqOpen(\''+n.id+'\',\''+esc(n.name)+'\','+(n.reconMax||10)+')">RECON</button>'+
         '<button class="btn inline" '+((cd||n.canHack===false)?"disabled":"")+
           ' onclick="act(\'hack\',{id:\''+n.id+'\'})">HACK</button>'+
       '</div></div>'}).join("");

@@ -509,10 +509,15 @@ void loraSendMsg(uint32_t target_id, const char* text) {
 //
 // Stealth used to feed only the attacker's own second roll, which the defender
 // never saw, so it had no bearing on whether a hack landed at all.
+// attackerRecon is the sequence-memory score for this target, 0..RECON_MAX_SEQ.
+// A perfect run is worth RECON_MAX_BONUS, which is what three button-press
+// recons used to be worth, so the curve is unchanged — it is just earned now.
 int loraHackChancePct(int attackerBrute, int attackerRecon,
                       int attackerStealth, int defenderFirewall) {
+  if (attackerRecon < 0)              attackerRecon = 0;
+  if (attackerRecon > RECON_MAX_SEQ)  attackerRecon = RECON_MAX_SEQ;
   int pct = 60
-          + attackerRecon * 5
+          + (attackerRecon * RECON_MAX_BONUS) / RECON_MAX_SEQ
           + (attackerBrute - defenderFirewall) * 2
           + attackerStealth;
   if (pct < 25) pct = 25;
@@ -521,11 +526,12 @@ int loraHackChancePct(int attackerBrute, int attackerRecon,
 }
 
 // Begin a hack. The verdict arrives later in PKT_HACK_REPLY (T4.3).
-void loraHackStart(uint32_t target_id, int reconCount) {
+void loraHackStart(uint32_t target_id, int reconScore) {
   PktHackReq pkt;
   fillHdr(&pkt.hdr, PKT_HACK_REQ, target_id);
   pkt.brute       = (uint8_t)skillBrute;
-  pkt.recon_count = (uint8_t)reconCount;
+  pkt.recon_score = (uint8_t)(reconScore < 0 ? 0 :
+                              reconScore > RECON_MAX_SEQ ? RECON_MAX_SEQ : reconScore);
   pkt.stealth     = (uint8_t)skillStealth;
   hackInFlight     = true;
   hackTargetId     = target_id;
@@ -686,7 +692,12 @@ void loraHandlePacket(uint8_t* buf, int len) {
       PktHackReq* p = (PktHackReq*)buf;
 
       // T4.3 — the defender rolls. The attacker only supplies its own stats.
-      int  pct          = loraHackChancePct(p->brute, p->recon_count,
+      // The score arrives from the attacker, so clamp it here. Everything
+      // else in this packet is self-reported too — the HMAC keeps strangers
+      // out, it does not make a device honest about its own stats.
+      int  claimed      = p->recon_score > RECON_MAX_SEQ ? RECON_MAX_SEQ
+                                                         : p->recon_score;
+      int  pct          = loraHackChancePct(p->brute, claimed,
                                             p->stealth, skillFirewall);
       bool attackerWins = (random(0, 100) < pct);
 
@@ -698,8 +709,8 @@ void loraHandlePacket(uint8_t* buf, int len) {
       deferReply(&reply, sizeof(reply));
       touchNode(hdr->from_id);
 
-      LORA_LOG("HACK from %08lx brute=%u stealth=%u recon=%u vs fw=%d -> %d%% -> %s",
-               (unsigned long)hdr->from_id, p->brute, p->stealth, p->recon_count,
+      LORA_LOG("HACK from %08lx brute=%u stealth=%u reconSeq=%d vs fw=%d -> %d%% -> %s",
+               (unsigned long)hdr->from_id, p->brute, p->stealth, claimed,
                skillFirewall, pct, attackerWins ? "THEY WIN" : "HELD");
 
       // Alert here rather than on HACK_RESULT: a modified attacker can decline

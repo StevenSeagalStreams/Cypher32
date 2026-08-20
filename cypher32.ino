@@ -1328,6 +1328,8 @@ String buildStateJson() {
     j += "\"status\":\""    + String(nodeStatusText(n)) + "\",";
     j += "\"ageMs\":"       + String(ageMs(n->last_seen_ms)) + ",";
     j += "\"recon\":"       + String(n->recon_count) + ",";
+    j += "\"reconScore\":"  + String(n->recon_score) + ",";
+    j += "\"reconMax\":"    + String(RECON_MAX_SEQ) + ",";
     j += "\"hackWon\":"     + String(recentlyHacked(nid) ? "true" : "false") + ",";
     j += "\"cooldownMs\":"  + String(hackCooldownLeft(nid)) + ",";
     j += "\"canHack\":"     + String(canAttackFaction(n->faction) ? "true" : "false") + ",";
@@ -1338,7 +1340,7 @@ String buildStateJson() {
     for (int k = 0; k < n->recon_count; k++)
       if (n->recon_types[k] == STAT_FIREWALL) fwKnown = n->recon_values[k];
     j += "\"odds\":" + String(fwKnown < 0 ? -1
-           : loraHackChancePct(skillBrute, n->recon_count, skillStealth, fwKnown)) + ",";
+           : loraHackChancePct(skillBrute, n->recon_score, skillStealth, fwKnown)) + ",";
     j += "\"unread\":"      + String(n->msg_unread ? "true" : "false") + ",";
     j += "\"msg\":\""       + jesc(String(n->msg_inbox)) + "\"";
     j += "}";
@@ -1438,6 +1440,18 @@ void handleApiAction() {
   if (a == "recon") {
     if (n->recon_count >= 3)  { apiFail(400, "Recon already complete"); return; }
     if (loraActionPending())  { apiFail(429, "Another action in flight"); return; }
+
+    // The sequence-memory result from the portal. Keep the best run against
+    // this node — a later, worse attempt should not undo a good one, or
+    // players would be punished for scouting again to reveal another stat.
+    int score = server.arg("score").toInt();
+    if (score < 0)             score = 0;
+    if (score > RECON_MAX_SEQ) score = RECON_MAX_SEQ;
+    if (score > n->recon_score) n->recon_score = (uint8_t)score;
+    Serial.printf("[RECON] %s sequence %d (best %u) -> +%d%% odds\n",
+                  chipIdStr(target).c_str(), score, n->recon_score,
+                  (n->recon_score * RECON_MAX_BONUS) / RECON_MAX_SEQ);
+
     loraSendRecon(target);
     server.send(200, "application/json", "{\"ok\":true}");
     return;
@@ -1455,7 +1469,7 @@ void handleApiAction() {
     if (recentlyFailed(nid))  { apiFail(400, "Locked out — try again later"); return; }
     if (loraActionPending())  { apiFail(429, "Another action in flight"); return; }
     hackPendingId = nid;
-    loraHackStart(target, n->recon_count);
+    loraHackStart(target, n->recon_score);
     server.send(200, "application/json", "{\"ok\":true}");
     return;
   }

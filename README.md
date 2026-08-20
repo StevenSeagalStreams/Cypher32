@@ -193,7 +193,18 @@ signal strength with a plain-language range — VERY CLOSE, CLOSE, DISTANT,
 FADING. Level and faction are visible. Everything else is dark until you probe.
 
 **2. Run recon.**  
-Up to 3 attempts. Each request goes out over LoRa and the target's device replies with a random stat — Brute, Stealth, or Firewall. They don't choose what you see. Their device just responds. Build a picture before you commit.
+Recon is a **sequence-memory game**. A grid of tiles flashes a pattern; repeat
+it. Each round adds one step. The furthest round you complete is your recon
+score for that target, and it is worth `score × 1.5%` on your hack odds — so a
+perfect run of **10 gives the full +15%**, putting a level starting hack at
+**75%**.
+
+One wrong tile ends the run, and your best score against that node is kept.
+
+Each attempt also sends a LoRa request and the target's device replies with a
+random stat — Brute, Stealth, or Firewall. They don't choose what you see.
+Three attempts reveal all three. Once you know their Firewall, the Radar shows
+your real odds instead of "unknown".
 
 **3. Hack.**  
 One attempt. One roll — made by *their* device, not yours, so nobody can modify
@@ -211,7 +222,7 @@ neither can be reset by power-cycling or waiting for them to drop off your radar
 **Hit chance** — one roll, made on the defender's device:
 ```
 base 60%
-+ 5% per recon completed        (max +15%)
++ 1.5% per recon sequence step   (max +15% at a perfect 10)
 + 2% per point of Brute Force over their Firewall
 + 1% per point of Stealth       (firewall cannot cancel this)
 floor: 25%   ceiling: 90%
