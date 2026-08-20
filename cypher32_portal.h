@@ -207,6 +207,9 @@ textarea{min-height:64px;resize:none}
         <div class="kv"><span class="mut">Signal</span><span id="hrssi">—</span></div>
         <div class="kv"><span class="mut">Airtime used</span><span id="hduty">—</span></div>
         <button class="btn ghost" onclick="act('beacon')">SEND BEACON</button>
+        <button class="btn ghost" onclick="act('showqr')">SHOW JOIN QR ON DEVICE</button>
+        <p class="xs mut">Puts a Wi-Fi QR on the e-ink for 60 seconds. Someone
+        can point a camera at it instead of hunting for your SSID.</p>
       </div>
     </div>
 

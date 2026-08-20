@@ -8,6 +8,7 @@
 #include "cypher32_packets.h"
 #include "cypher32_lora.h"
 #include "cypher32_portal.h"
+#include "cypher32_qr.h"
 
 // Heltec Wireless Paper V1.2 — 250x122px landscape
 // Pointer: constructor must NOT run at global init time (before Vext is on)
@@ -1319,15 +1320,41 @@ void displayArmed() {
   display.update();
 }
 
-void displaySetup() {
+// The Wi-Fi join QR. E-ink is ideal for this: it costs nothing to leave on
+// screen indefinitely, and pointing a camera beats typing an SSID.
+void displayQr(const String& ssid, const char* line1, const char* line2) {
+  displayRefreshes++;
   display.clearMemory(); display.landscape();
-  printCenter(MARGIN_Y, "CYPHER32 // SETUP REQUIRED");
-  drawSep(12);
-  drawSprite(spr_idle1, SPR_IDLE1_W, SPR_IDLE1_H, FACE_Y);
-  drawBubbleRight("Who are you?", "1.WiFi:Cypher32_Setup",
-                  "  Pass: cypher32", "2.Open 192.168.4.1");
-  drawSep(88);
+
+  QrCode q;
+  String payload = qrWifiString(ssid);
+  if (!qrEncode(payload.c_str(), &q)) {          // too long to encode
+    printCenter(40, "JOIN WIFI");
+    printCenter(58, ssid);
+    printCenter(76, "then 192.168.4.1");
+    display.update();
+    return;
+  }
+
+  const int scale = 3;                            // 29 modules -> 87 px
+  int qs = q.size * scale;
+  int x0 = 12;                                    // 12 px = 4 modules of quiet
+  int y0 = (DISP_H - qs) / 2;
+  for (int r = 0; r < q.size; r++)
+    for (int c = 0; c < q.size; c++)
+      if (q.mod[r][c])
+        display.fillRect(x0 + c * scale, y0 + r * scale, scale, scale, BLACK);
+
+  int tx = x0 + qs + 16;
+  printAt(tx, 22, "SCAN TO JOIN");
+  printAt(tx, 40, ssid);
+  printAt(tx, 62, line1);
+  printAt(tx, 76, line2);
   display.update();
+}
+
+void displaySetup() {
+  displayQr(WiFi.softAPSSID(), "No password.", "Then 192.168.4.1");
 }
 
 // ─────────────────────────────────────────────
@@ -1561,6 +1588,12 @@ void handleApiAction() {
   String a = server.arg("a");
 
   if (a == "beacon")     { loraSendBeacon(); apiOk("Beacon sent"); return; }
+  if (a == "showqr")     {
+    // Put the join code on the e-ink so someone can point a camera at it.
+    displayQr(WiFi.softAPSSID(), "Open network.", "Then 192.168.4.1");
+    revertIdleAtMs = millis() + 60000;   // a full minute to get it scanned
+    apiOk("QR on the display for 60s"); return;
+  }
   if (a == "clearnodes") { knownCount = 0; memset(knownNodes, 0, sizeof(knownNodes));
                            apiOk("Node list cleared"); return; }
   if (a == "reset")      { server.send(200, "application/json", "{\"instant\":true,\"msg\":\"Wiping\"}");

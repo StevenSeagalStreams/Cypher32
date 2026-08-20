@@ -4,3 +4,5 @@ test/portal/portal.html
 test/portal/portal.js
 test/portal/.run.js
 *.o
+test/test_qr
+test/test_qr_mask

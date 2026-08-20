@@ -57,7 +57,11 @@ The device is already broadcasting. An open Wi-Fi network named **`Cypher32`** a
 
 ### Step 3 — Connect
 
-Join **`Cypher32`** on your phone or laptop. The portal should open by itself —
+The device shows a **Wi-Fi QR code** on its screen. Point your camera at it and
+your phone offers to join — no typing an SSID. (Any time later, HUD → SHOW JOIN
+QR ON DEVICE puts it back up for a minute so someone else can scan it.)
+
+Or join **`Cypher32`** manually. The portal should open by itself —
 the device runs a captive portal, so your phone's "sign in to network" prompt
 lands you straight on it.
 
@@ -313,6 +317,7 @@ The character notices when you're losing.
 | `cypher32_lora.h` | LoRa stack — link layer, retries, presence, diagnostics |
 | `cypher32_crypto.h` | SHA-256 / HMAC-SHA256 for frame signing |
 | `cypher32_portal.h` | The web portal, one HTML/CSS/JS blob in PROGMEM |
+| `cypher32_qr.h` | Minimal QR encoder for the Wi-Fi join code |
 | `platformio.ini` | PlatformIO build config |
 | `ROADMAP.md` | Development plan and current status |
 | `test/` | Host-side tests — `cd test && make` |

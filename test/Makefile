@@ -15,8 +15,8 @@ CXX      ?= g++
 CXXFLAGS := -std=c++17 -I stub -Wall -Wno-format
 BINS     := test_link test_twonode
 
-.PHONY: all run asan portal lint clean
-all: lint run portal
+.PHONY: all run asan portal lint qr clean
+all: lint run portal qr
 
 run: $(BINS)
 	@for b in $(BINS); do echo "── $$b ──"; ./$$b || exit 1; echo; done
@@ -38,6 +38,16 @@ portal:
 	  node portal/.run.js || exit 1; \
 	else echo "node not found — skipping portal render tests"; fi
 
+qr: test_qr test_qr_mask
+	@echo "── qr ──"
+	@python3 test_qr.py
+
+test_qr: test_qr.cpp ../cypher32_qr.h
+	$(CXX) $(CXXFLAGS) -o $@ $<
+
+test_qr_mask: test_qr_mask.cpp ../cypher32_qr.h
+	$(CXX) $(CXXFLAGS) -o $@ $<
+
 test_link: test_link.cpp ../cypher32_lora.h ../cypher32_packets.h ../cypher32_crypto.h
 	$(CXX) $(CXXFLAGS) -o $@ $<
 
@@ -45,4 +55,4 @@ test_twonode: test_twonode.cpp ../cypher32_lora.h ../cypher32_packets.h ../cyphe
 	$(CXX) $(CXXFLAGS) -o $@ $<
 
 clean:
-	rm -f $(BINS) portal/portal.html portal/portal.js portal/.run.js
+	rm -f $(BINS) test_qr test_qr_mask portal/portal.html portal/portal.js portal/.run.js
