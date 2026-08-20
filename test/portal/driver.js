@@ -45,6 +45,19 @@ ck(el("banner").className==="banner bad","timeout shows failure banner");
 ck(el("banner").textContent.includes("out of range"),"timeout explains why");
 
 S={...S1,sp:0}; render();
+// event log
+S={...S1,events:[
+  {t:"you breached",who:"NullGate",xp:42,ageMs:9000},
+  {t:"scouted you", who:"VoidCrypt",xp:0, ageMs:65000},
+  {t:"discovered",  who:"IronCore", xp:0, ageMs:400000}]};
+render();
+ck(el("lcount").textContent==="3 recent","log count shown");
+ck((el("loglist").innerHTML.match(/class="msg"/g)||[]).length===3,"three entries rendered");
+ck(el("loglist").innerHTML.indexOf("+42 XP")>=0,"positive XP shown with a sign");
+ck(el("loglist").innerHTML.indexOf("NullGate")>=0,"peer name shown");
+S={...S1,events:[]}; render();
+ck(el("loglist").innerHTML.indexOf("Nothing has happened")>=0,"empty log explains itself");
+
 // battery: no cell attached must read as USB, not a fabricated 0%
 S={...S1,battery:-1,onUsb:true}; render();
 ck(el("hbat").textContent==="USB","no battery reads as USB, not 0%");

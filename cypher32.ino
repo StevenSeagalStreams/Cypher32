@@ -267,6 +267,50 @@ bool     restartPending = false;
 uint32_t restartAtMs    = 0;
 void requestRestart(uint32_t inMs) { restartPending = true; restartAtMs = millis() + inMs; }
 
+// ── Event log ────────────────────────────────
+//  The last 20 things that happened to this device. Until now the only record
+//  of your session was the avatar's mood, which tells you how it went but
+//  never who, what or when.
+//
+//  RAM only, deliberately: it is a session story, not a save file, and NVS
+//  writes are the one thing that wears out on this board.
+#define EVENT_LOG_SIZE 20
+enum EvType { EV_DISCOVER, EV_SCOUTED, EV_RECON, EV_HACK_WON, EV_HACK_LOST,
+              EV_BREACHED, EV_HELD, EV_MSG_IN, EV_MSG_OUT, EV_LEVEL, EV_TRAIN };
+struct GameEvent {
+  uint8_t       type;
+  uint32_t      peer;      // 0 when there is no other party
+  int16_t       xp;        // signed delta, 0 when not applicable
+  unsigned long at;        // millis()
+};
+GameEvent eventLog[EVENT_LOG_SIZE];
+uint8_t   eventCount = 0;   // how many slots are filled (caps at EVENT_LOG_SIZE)
+uint8_t   eventNext  = 0;   // write cursor
+
+void logEvent(uint8_t type, uint32_t peer, int xp) {
+  GameEvent& e = eventLog[eventNext];
+  e.type = type; e.peer = peer; e.xp = (int16_t)xp; e.at = millis();
+  eventNext = (uint8_t)((eventNext + 1) % EVENT_LOG_SIZE);
+  if (eventCount < EVENT_LOG_SIZE) eventCount++;
+}
+
+const char* evName(uint8_t t) {
+  switch (t) {
+    case EV_DISCOVER:  return "discovered";
+    case EV_SCOUTED:   return "scouted you";
+    case EV_RECON:     return "you scouted";
+    case EV_HACK_WON:  return "you breached";
+    case EV_HACK_LOST: return "hack failed";
+    case EV_BREACHED:  return "breached you";
+    case EV_HELD:      return "firewall held";
+    case EV_MSG_IN:    return "message from";
+    case EV_MSG_OUT:   return "message to";
+    case EV_LEVEL:     return "levelled up";
+    case EV_TRAIN:     return "training";
+  }
+  return "?";
+}
+
 // Set by any handler that put a transient screen up; loop() returns the
 // display to idle when it expires. Avoids blocking delay() in handlers.
 unsigned long revertIdleAtMs = 0;
@@ -1230,6 +1274,23 @@ void displayWiping() {
   display.update();
 }
 
+// Discovery is the moment this game turns on for people, so it gets the whole
+// screen rather than a line in a list.
+void displayNewNode(uint32_t id, uint8_t lvl, char fac) {
+  displayRefreshes++;
+  display.clearMemory(); display.landscape();
+  printCenter(16, "// NODE DETECTED");
+  drawSep(28);
+  String name = nodeNameFromId(id);
+  display.setTextSize(2);
+  printCenter(42, name);
+  display.setTextSize(1);
+  String sub = "LVL " + String(lvl) + "   " + factionName(fac);
+  printCenter(72, sub);
+  printCenter(92, "192.168.4.1 to scout");
+  display.update();
+}
+
 // Shown after a double RST tap, so the armed state is never invisible.
 void displayArmed() {
   displayRefreshes++;
@@ -1385,6 +1446,19 @@ String buildStateJson() {
     j += "\"msg\":\""       + jesc(String(n->msg_inbox)) + "\"";
     j += "}";
   }
+  j += "],";
+
+  // Newest first, so the page does not have to reverse it.
+  j += "\"events\":[";
+  for (int k = 0; k < eventCount; k++) {
+    int idx = (eventNext - 1 - k + EVENT_LOG_SIZE * 2) % EVENT_LOG_SIZE;
+    GameEvent& e = eventLog[idx];
+    if (k) j += ",";
+    j += "{\"t\":\""   + String(evName(e.type)) + "\",";
+    j += "\"who\":\""  + String(e.peer ? jesc(nodeNameFromId(e.peer)) : String("")) + "\",";
+    j += "\"xp\":"      + String(e.xp) + ",";
+    j += "\"ageMs\":"   + String(ageMs(e.at)) + "}";
+  }
   j += "]}";
   return j;
 }
@@ -1500,6 +1574,7 @@ void handleApiAction() {
                   chipIdStr(target).c_str(), score, n->recon_score,
                   (n->recon_score * RECON_MAX_BONUS) / RECON_MAX_SEQ);
 
+    logEvent(EV_RECON, target, score);
     loraSendRecon(target);
     server.send(200, "application/json", "{\"ok\":true}");
     return;
@@ -1526,6 +1601,7 @@ void handleApiAction() {
     if (txt.length() == 0)   { apiFail(400, "Empty message"); return; }
     if (loraActionPending()) { apiFail(429, "Another action in flight"); return; }
     strncpy(n->msg_sent, txt.c_str(), 32); n->msg_sent[32] = '\0';
+    logEvent(EV_MSG_OUT, target, 0);
     loraSendMsg(target, txt.c_str());
     server.send(200, "application/json", "{\"ok\":true}");
     return;
@@ -1603,6 +1679,7 @@ void resolveHackVerdict() {
                 won ? "WIN" : "HELD", effectiveWin ? "WIN" : "LOSS",
                 result.xpDelta, result.note.c_str());
 
+  logEvent(effectiveWin ? EV_HACK_WON : EV_HACK_LOST, target, result.xpDelta);
   shiftMood(effectiveWin ? +2 : -2, effectiveWin ? "won a hack" : "lost a hack");
 
   bool lvlUp = false;
@@ -1617,7 +1694,7 @@ void resolveHackVerdict() {
   }
 
   saveProgress();
-  if (lvlUp) { shiftMood(+3, "levelled up"); displayLevelUp();
+  if (lvlUp) { logEvent(EV_LEVEL, 0, 0); shiftMood(+3, "levelled up"); displayLevelUp();
                revertIdleAtMs = millis() + 6000; }
   else                            revertIdleAtMs = millis() + 4000;
 }
@@ -1845,9 +1922,21 @@ void loop() {
     String msg  = pendingMsg;
     String from = pendingMsgFrom;
     pendingMsg = ""; pendingMsgFrom = "";
+    logEvent(EV_MSG_IN, (uint32_t)strtoul(from.c_str(), nullptr, 16), 0);
     Serial.printf("[MSG] from %s: \"%s\" (mood stays %d)\n",
                   from.c_str(), msg.c_str(), cyMood);
     displayIncomingMsg(from, msg);
+    revertIdleAtMs = millis() + 5000;
+  }
+
+  // Someone new appeared, or someone scouted us. Drain both queues; the
+  // discovery screen is paced naturally by revertIdleAtMs.
+  uint32_t peer;
+  while (loraPopScoutedBy(&peer)) logEvent(EV_SCOUTED, peer, 0);
+  if (revertIdleAtMs == 0 && loraPopNewNode(&peer)) {
+    logEvent(EV_DISCOVER, peer, 0);
+    KnownNode* nn = findNode(peer);
+    displayNewNode(peer, nn ? nn->level : 0, nn ? nn->faction : '?');
     revertIdleAtMs = millis() + 5000;
   }
 
@@ -1873,6 +1962,8 @@ void loop() {
     String who = pendingHackFrom;
     Serial.printf("[HACK] inbound attempt from %s — attacker %s\n",
                   who.c_str(), pendingHackAttackerWon ? "won" : "was held off");
+    uint32_t whoId = (uint32_t)strtoul(who.c_str(), nullptr, 16);
+    logEvent(pendingHackAttackerWon ? EV_BREACHED : EV_HELD, whoId, 0);
     if (pendingHackAttackerWon) {
       shiftMood(-1, "breached by a peer");
       displayHackFailed(who, 0, "Breached by " + nodeNameFromId(

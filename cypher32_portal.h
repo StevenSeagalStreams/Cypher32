@@ -254,6 +254,16 @@ textarea{min-height:64px;resize:none}
       <div class="card"><div class="ct">Inbox</div><div id="inbox"></div></div>
     </div>
 
+    <!-- EVENT LOG -->
+    <div id="t-log" class="pane hide">
+      <div class="row" style="margin-bottom:10px">
+        <h3 style="margin:0">EVENT LOG</h3><span class="xs mut" id="lcount">—</span>
+      </div>
+      <div class="card"><div id="loglist"></div></div>
+      <p class="xs mut">The last 20 things that happened. Kept in memory only,
+      so it clears when the device restarts.</p>
+    </div>
+
     <!-- SETTINGS -->
     <div id="t-cfg" class="pane hide">
       <div class="card">
@@ -303,9 +313,10 @@ textarea{min-height:64px;resize:none}
   <nav class="tabs">
     <button class="tab on" data-t="hud"   onclick="tab('hud')"><span class="ic">▣</span>HUD</button>
     <button class="tab"    data-t="radar" onclick="tab('radar')"><span class="ic">◎</span>RADAR</button>
-    <button class="tab"    data-t="skills"onclick="tab('skills')"><span class="ic">▲</span>SKILLS</button>
+    <button class="tab"    data-t="skills"onclick="tab('skills')"><span class="ic">▲</span>SKILL</button>
     <button class="tab"    data-t="msgs"  onclick="tab('msgs')"><span class="ic">✉</span>MSGS</button>
-    <button class="tab"    data-t="cfg"   onclick="tab('cfg')"><span class="ic">⚙</span>CONFIG</button>
+    <button class="tab"    data-t="log"   onclick="tab('log')"><span class="ic">≡</span>LOG</button>
+    <button class="tab"    data-t="cfg"   onclick="tab('cfg')"><span class="ic">⚙</span>CFG</button>
   </nav>
 </div>
 
@@ -347,7 +358,7 @@ function banner(msg,kind,hold){
   clearTimeout(b._t);if(hold!==true)b._t=setTimeout(function(){b.className="banner"},3200)}
 
 function tab(t){cur=t;
-  ["hud","radar","skills","msgs","cfg","diag"].forEach(function(x){
+  ["hud","radar","skills","msgs","log","cfg","diag"].forEach(function(x){
     var e=$("t-"+x);if(e)e.className="pane"+(x===t?"":" hide")});
   Array.prototype.forEach.call(document.querySelectorAll(".tab"),function(b){
     b.className="tab"+(b.dataset.t===t?" on":"")});
@@ -610,6 +621,18 @@ function render(){
     return'<div class="msg"><div class="xs mut">'+esc(n.name)+
       (n.unread?' <span class="dot"></span>':'')+'</div><div>'+esc(n.msg)+'</div></div>'
     }).join(""):'<div class="xs mut">No messages yet.</div>';
+
+  var ev=S.events||[];
+  $("lcount").textContent=ev.length?ev.length+" recent":"nothing yet";
+  $("loglist").innerHTML=ev.length?ev.map(function(e){
+    var xp=e.xp?'<span style="color:'+(e.xp>0?"#8dffb4":"#ffb0b0")+'">'+
+      (e.xp>0?"+":"")+e.xp+' XP</span>':'';
+    return '<div class="msg"><div class="row">'+
+      '<span>'+esc(e.t)+(e.who?' <b>'+esc(e.who)+'</b>':'')+'</span>'+
+      '<span class="xs mut">'+fmtAge(e.ageMs)+'</span></div>'+
+      (xp?'<div class="xs">'+xp+'</div>':'')+'</div>';
+  }).join(""):'<div class="xs mut">Nothing has happened yet. Wait for a node to '+
+    'appear, or scout one from the Radar.</div>';
 
   $("pwstate").textContent=pw()?"password saved":"not set — actions will ask";
   $("cname").textContent=S.name;$("cfac").textContent=S.faction;

@@ -129,6 +129,28 @@ uint8_t   loraBootBurst       = 0;
 String    pendingMsg     = "";
 String    pendingMsgFrom = "";
 
+// ── Things the sketch wants to know about, queued rather than flagged ──
+// A single flag loses the second event when two land close together, and
+// meeting two people at once is exactly when you most want to be told.
+#define PEER_EVT_QUEUE 6
+static uint32_t newNodeQ[PEER_EVT_QUEUE]; static uint8_t newNodeHead = 0, newNodeTail = 0;
+static uint32_t scoutedQ[PEER_EVT_QUEUE]; static uint8_t scoutedHead = 0, scoutedTail = 0;
+
+static void qPush(uint32_t* q, uint8_t* head, uint8_t tail, uint32_t id) {
+  uint8_t next = (uint8_t)((*head + 1) % PEER_EVT_QUEUE);
+  if (next == tail) return;                 // full: drop the newest, keep order
+  q[*head] = id; *head = next;
+}
+static bool qPop(uint32_t* q, uint8_t head, uint8_t* tail, uint32_t* out) {
+  if (head == *tail) return false;
+  *out = q[*tail]; *tail = (uint8_t)((*tail + 1) % PEER_EVT_QUEUE);
+  return true;
+}
+// A node we had never heard from before just appeared.
+bool loraPopNewNode(uint32_t* out)  { return qPop(newNodeQ, newNodeHead, &newNodeTail, out); }
+// Someone ran recon against us.
+bool loraPopScoutedBy(uint32_t* out){ return qPop(scoutedQ, scoutedHead, &scoutedTail, out); }
+
 // Inbound hack notification for the defender's display. Previously impossible:
 // HACK_RESULT was never transmitted by anyone.
 bool      pendingHackAlert       = false;
@@ -235,6 +257,7 @@ KnownNode* touchNode(uint32_t chip_id) {
     n->first_seen_ms = millis();
     // A new neighbour appearing is exactly when discovery should speed up.
     loraFastUntilMs  = millis() + BEACON_FAST_WINDOW_MS;
+    qPush(newNodeQ, &newNodeHead, newNodeTail, chip_id);
   }
   n->last_seen_ms = millis();
   n->rssi  = (int16_t)loraLastRSSI;
@@ -671,6 +694,7 @@ void loraHandlePacket(uint8_t* buf, int len) {
       reply.stat_type = types[pick]; reply.stat_value = stats[pick];
       deferReply(&reply, sizeof(reply));
       touchNode(hdr->from_id);
+      qPush(scoutedQ, &scoutedHead, scoutedTail, hdr->from_id);   // they scouted us
       break;
     }
     case PKT_RECON_REPLY: {
