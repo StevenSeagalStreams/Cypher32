@@ -115,7 +115,7 @@ textarea{min-height:64px;resize:none}
     <div class="xs mut" id="seqmsg">Watch the sequence, then repeat it.</div>
     <div class="seq" id="seqgrid"></div>
     <div class="xs mut">Each round adds one step. Reach <b id="seqmax">10</b> for the
-    full <b>+15%</b> hack bonus. Your best run against this node is kept.</div>
+    full <b>+15%</b> hack bonus. Your best run is kept, and you get three attempts per node before its cooldown has to run out.</div>
     <button id="seqbtn" onclick="seqBegin()">START</button>
     <button class="btn ghost" onclick="seqQuit()">Cancel</button>
   </div>
@@ -590,8 +590,11 @@ function render(){
         (lock?'<span class="xs mut">'+lock+'</span>':'')+'</div>'+
       (n.canHack===false?'<div class="xs mut" style="margin-top:6px">'+
         'Immune &mdash; WHITE can only attack BLACK and RED.</div>':'')+
+      (n.canRecon===false?'<div class="xs mut" style="margin-top:6px">'+
+        (cd?'Recon locked until the cooldown ends &mdash; then 3 fresh attempts.'
+           :'Recon spent. Hack it, or wait out the cooldown for 3 more.')+'</div>':'')+
       '<div class="row" style="margin-top:10px;gap:8px">'+
-        '<button class="btn inline ghost" '+(n.recon>=3?"disabled":"")+
+        '<button class="btn inline ghost" '+(n.canRecon===false?"disabled":"")+
           ' onclick="seqOpen(\''+n.id+'\',\''+esc(n.name)+'\','+(n.reconMax||10)+')">RECON</button>'+
         '<button class="btn inline" '+((cd||n.canHack===false)?"disabled":"")+
           ' onclick="act(\'hack\',{id:\''+n.id+'\'})">HACK</button>'+

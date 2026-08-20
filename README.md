@@ -201,6 +201,10 @@ perfect run of **10 gives the full +15%**, putting a level starting hack at
 
 One wrong tile ends the run, and your best score against that node is kept.
 
+You get **three attempts per node**. Spend them and recon is closed until that
+node's cooldown ends — then it resets and you get three fresh attempts, with
+the score cleared so the bonus has to be earned again.
+
 Each attempt also sends a LoRa request and the target's device replies with a
 random stat — Brute, Stealth, or Firewall. They don't choose what you see.
 Three attempts reveal all three. Once you know their Firewall, the Radar shows
@@ -212,9 +216,12 @@ their firmware to declare themselves the winner. The result appears on both
 displays. They find out the moment your request lands, whether or not you tell
 them how it went.
 
-**4. Win** — target locked for **7 days**. They're yours and they know it.
+**4. Win** — the node is yours and locked for **12 hours**.
 
 **5. Lose** — locked out of that node for **12 hours**. Move on.
+
+Either way the node closes for 12 hours. When that ends, recon resets too: three
+fresh attempts and a clean slate on the sequence bonus.
 
 Both cooldowns survive a reboot and survive the target walking out of range, so
 neither can be reset by power-cycling or waiting for them to drop off your radar.

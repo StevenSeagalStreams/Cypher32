@@ -253,8 +253,12 @@ String failList   = "";   // 12 h retry cooldowns (T4.4)
 String hackPendingId = "";   // target of the hack currently awaiting a verdict
 
 // 7 days in milliseconds
-#define WEEK_MS      604800000UL
-#define HALF_DAY_MS   43200000UL   // 12 hours hack retry cooldown
+#define HALF_DAY_MS   43200000UL   // 12 hours
+// Owning a node used to hold it for a week, which on a 250x122 screen read as
+// "6d 23h" and made a target dead for a whole event. Both locks are the same
+// 12-hour window now, kept as separate names so they can diverge again later.
+#define OWNED_LOCK_MS HALF_DAY_MS  // after a successful hack
+#define FAIL_LOCK_MS  HALF_DAY_MS  // after a failed one
 
 // Rebooting from inside a request handler cuts the TCP connection before the
 // response has flushed, so the browser sees a reset instead of the reply and
@@ -441,15 +445,21 @@ void listPrune(String& list, unsigned long window) {
   list = fresh;
 }
 
-bool recentlyHacked(String id) { return listHas(hackedList, id, WEEK_MS); }
+bool recentlyHacked(String id) { return listHas(hackedList, id, OWNED_LOCK_MS); }
 void recordHack(String id)     { listRecord(hackedList, id); }
-bool recentlyFailed(String id) { return listHas(failList, id, HALF_DAY_MS); }
+bool recentlyFailed(String id) { return listHas(failList, id, FAIL_LOCK_MS); }
 void recordFail(String id)     { listRecord(failList, id); }
 
 void pruneHackedList() {
-  listPrune(hackedList, WEEK_MS);
-  listPrune(failList,   HALF_DAY_MS);
+  listPrune(hackedList, OWNED_LOCK_MS);
+  listPrune(failList,   FAIL_LOCK_MS);
 }
+
+// A node's lock closing ends the engagement window: three fresh recon
+// attempts, and the sequence score is cleared so the bonus has to be earned
+// again. Without this, recon_count never returned to zero — three poor
+// mini-game runs left you permanently stuck with bad odds against that target.
+void serviceReconResets();
 
 // Remaining cooldown in ms, 0 if free — drives the portal's live countdowns.
 unsigned long hackCooldownLeft(String id) {
@@ -459,7 +469,7 @@ unsigned long hackCooldownLeft(String id) {
     int comma = hackedList.indexOf(",", colon);
     if (comma != -1) {
       unsigned long e = nowMs() - hackedList.substring(colon, comma).toInt();
-      if (e < WEEK_MS) return WEEK_MS - e;
+      if (e < OWNED_LOCK_MS) return OWNED_LOCK_MS - e;
     }
   }
   start = failList.indexOf(id + ":");
@@ -468,10 +478,26 @@ unsigned long hackCooldownLeft(String id) {
     int comma = failList.indexOf(",", colon);
     if (comma != -1) {
       unsigned long e = nowMs() - failList.substring(colon, comma).toInt();
-      if (e < HALF_DAY_MS) return HALF_DAY_MS - e;
+      if (e < FAIL_LOCK_MS) return FAIL_LOCK_MS - e;
     }
   }
   return 0;
+}
+
+void serviceReconResets() {
+  for (int i = 0; i < knownCount; i++) {
+    KnownNode* n = &knownNodes[i];
+    if (!n->hack_attempted) continue;                 // no window to close
+    String nid = chipIdStr(n->chip_id);
+    if (hackCooldownLeft(nid) > 0) continue;          // still locked
+
+    n->hack_attempted = false;
+    n->recon_count    = 0;
+    n->recon_score    = 0;
+    memset(n->recon_types,  0, sizeof(n->recon_types));
+    memset(n->recon_values, 0, sizeof(n->recon_values));
+    Serial.printf("[RECON] %s lock expired — 3 fresh attempts\n", nid.c_str());
+  }
 }
 
 // ─────────────────────────────────────────────
@@ -1333,6 +1359,8 @@ String buildStateJson() {
     j += "\"hackWon\":"     + String(recentlyHacked(nid) ? "true" : "false") + ",";
     j += "\"cooldownMs\":"  + String(hackCooldownLeft(nid)) + ",";
     j += "\"canHack\":"     + String(canAttackFaction(n->faction) ? "true" : "false") + ",";
+    j += "\"canRecon\":"    + String((hackCooldownLeft(nid) == 0 && n->recon_count < 3)
+                                       ? "true" : "false") + ",";
     // Real odds, but only once recon has actually revealed their firewall.
     // Guessing a number here would be worse than admitting we do not know:
     // finding out is what recon is for.
@@ -1436,9 +1464,17 @@ void handleApiAction() {
   if (target == 0) { apiFail(400, "Bad target"); return; }
   KnownNode* n = findNode(target);
   if (!n) { apiFail(404, "Node not in range"); return; }
+  String nid0 = chipIdStr(target);
 
   if (a == "recon") {
-    if (n->recon_count >= 3)  { apiFail(400, "Recon already complete"); return; }
+    // No scouting while the node is locked. The lock expiring is what hands
+    // back the three attempts, so playing during it would defeat the reset.
+    if (hackCooldownLeft(nid0) > 0) {
+      apiFail(400, "Locked out — wait for the cooldown"); return;
+    }
+    if (n->recon_count >= 3)  {
+      apiFail(400, "Recon spent — hack it, or wait for the cooldown"); return;
+    }
     if (loraActionPending())  { apiFail(429, "Another action in flight"); return; }
 
     // The sequence-memory result from the portal. Keep the best run against
@@ -1848,10 +1884,13 @@ void loop() {
     if (idleNeedsRefresh()) displayIdle();
   }
 
-  // Prune stale hack records
+  // Prune stale hack records, and hand back recon attempts on any node whose
+  // lock has just expired. Checked often enough that the Radar refreshes
+  // within a few seconds of a cooldown ending.
   static unsigned long lastPrune = 0;
-  if (millis() - lastPrune > 300000UL) {
+  if ((uint32_t)(millis() - lastPrune) > 5000UL) {
     lastPrune = millis();
     pruneHackedList();
+    serviceReconResets();
   }
 }
