@@ -45,6 +45,16 @@ ck(el("banner").className==="banner bad","timeout shows failure banner");
 ck(el("banner").textContent.includes("out of range"),"timeout explains why");
 
 S={...S1,sp:0}; render();
+// training dummy — present at LVL 1, explained, hackable with no cooldown
+S={...S1,nodes:[{id:"00000001",name:"TRAINING",level:1,faction:"G",avgRssi:-40,
+  bars:4,proximity:"SIMULATED",status:"ACTIVE",ageMs:0,recon:0,reconScore:0,
+  reconMax:10,hackWon:false,cooldownMs:0,canHack:true,canRecon:true,
+  training:true,odds:-1,unread:false,msg:""}]};
+render();
+ck(el("nodelist").innerHTML.indexOf("TRAINING")>=0,"training node listed");
+ck(el("nodelist").innerHTML.indexOf("Practice target")>=0,"training node explains itself");
+ck(el("nodelist").innerHTML.indexOf("odds unknown")>=0,"odds hidden until recon reveals firewall");
+
 // event log
 S={...S1,events:[
   {t:"you breached",who:"NullGate",xp:42,ageMs:9000},

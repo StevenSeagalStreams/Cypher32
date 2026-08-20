@@ -311,6 +311,24 @@ const char* evName(uint8_t t) {
   return "?";
 }
 
+// ── Training dummy ───────────────────────────
+//  A simulated node that only exists while you are LVL 1, so the whole loop
+//  — scout, read your odds, strike — can be learned at home instead of
+//  fumbled at an event with a stranger waiting.
+//
+//  It never touches the radio. Winning against it pays real XP, which lifts
+//  you past LVL 1 and retires it: completing the lesson is what ends it.
+//  Losing costs nothing you have (XP floors at zero) so it can be retried.
+#define TRAINING_ID    0x00000001UL   // reserved, never a real chip ID
+#define TRAIN_BRUTE    2
+#define TRAIN_STEALTH  1
+#define TRAIN_FIREWALL 4
+
+uint8_t trainRecon = 0;   // attempts used this round (0-3)
+uint8_t trainScore = 0;   // best sequence this round
+
+bool trainingActive() { return myLevel <= 1; }
+
 // Set by any handler that put a transient screen up; loop() returns the
 // display to idle when it expires. Avoids blocking delay() in handlers.
 unsigned long revertIdleAtMs = 0;
@@ -1413,10 +1431,29 @@ String buildStateJson() {
   j += "},";
 
   j += "\"nodes\":[";
+  bool wroteNode = false;
+  if (trainingActive()) {
+    wroteNode = true;
+    int fwKnownT = (trainRecon >= 3) ? TRAIN_FIREWALL : -1;
+    j += "{\"id\":\"00000001\",\"name\":\"TRAINING\",\"level\":1,";
+    j += "\"faction\":\"G\",\"avgRssi\":-40,\"bars\":4,";
+    j += "\"proximity\":\"SIMULATED\",\"status\":\"ACTIVE\",\"ageMs\":0,";
+    j += "\"recon\":"      + String(trainRecon) + ",";
+    j += "\"reconScore\":" + String(trainScore) + ",";
+    j += "\"reconMax\":"   + String(RECON_MAX_SEQ) + ",";
+    j += "\"hackWon\":false,\"cooldownMs\":0,";
+    j += "\"canHack\":true,";
+    j += "\"canRecon\":"   + String(trainRecon < 3 ? "true" : "false") + ",";
+    j += "\"training\":true,";
+    j += "\"odds\":" + String(fwKnownT < 0 ? -1
+           : loraHackChancePct(skillBrute, trainScore, skillStealth, fwKnownT)) + ",";
+    j += "\"unread\":false,\"msg\":\"\"}";
+  }
   for (int i = 0; i < knownCount; i++) {
     KnownNode* n = &knownNodes[i];
     String nid = chipIdStr(n->chip_id);
-    if (i) j += ",";
+    if (wroteNode) j += ",";
+    wroteNode = true;
     j += "{\"id\":\""       + nid + "\",";
     j += "\"name\":\""      + jesc(nodeNameFromId(n->chip_id)) + "\",";
     j += "\"level\":"       + String(n->level) + ",";
@@ -1544,9 +1581,59 @@ void handleApiAction() {
     skillPoints--; saveProgress(); apiOk("Skill raised"); return;
   }
 
+  uint32_t target = (uint32_t)strtoul(server.arg("id").c_str(), nullptr, 16);
+
+  // ── the training dummy resolves entirely on this device ──
+  // Handled before the radio checks so the lesson works with no one else
+  // around, which is the entire point of it.
+  if (target == TRAINING_ID) {
+    if (!trainingActive()) { apiFail(400, "Training is over — you levelled up"); return; }
+
+    if (a == "recon") {
+      if (trainRecon >= 3) { apiFail(400, "Practice recon spent — try the hack"); return; }
+      int score = server.arg("score").toInt();
+      if (score < 0)             score = 0;
+      if (score > RECON_MAX_SEQ) score = RECON_MAX_SEQ;
+      if (score > trainScore) trainScore = (uint8_t)score;
+      trainRecon++;
+      logEvent(EV_TRAIN, 0, 0);
+      apiOk("Recon logged — sequence " + String(score));
+      return;
+    }
+    if (a == "hack") {
+      int pct = loraHackChancePct(skillBrute, trainScore, skillStealth, TRAIN_FIREWALL);
+      bool won = (random(0, 100) < pct);
+      HackResult r = resolveHackOutcome("GREEN", TRAIN_FIREWALL, won);
+
+      Serial.printf("[TRAIN] seq=%u odds=%d%% -> %s, XP %+d\n",
+                    trainScore, pct, r.success ? "WIN" : "LOSS", r.xpDelta);
+      logEvent(r.success ? EV_HACK_WON : EV_HACK_LOST, 0, r.xpDelta);
+      shiftMood(r.success ? +2 : -2, r.success ? "won a hack" : "lost a hack");
+
+      // Reset the round either way: practice should be repeatable, and there
+      // is no cooldown on a target that does not exist.
+      trainRecon = 0; trainScore = 0;
+
+      bool lvlUp = applyXP(r.xpDelta);
+      saveProgress();
+      if (r.success) displayHackSuccess("TRAINING", r.xpDelta, r.note);
+      else           displayHackFailed("TRAINING", abs(r.xpDelta), r.note);
+      if (lvlUp) { logEvent(EV_LEVEL, 0, 0); shiftMood(+3, "levelled up");
+                   displayLevelUp(); revertIdleAtMs = millis() + 6000; }
+      else                            revertIdleAtMs = millis() + 4000;
+
+      server.send(200, "application/json",
+                  String("{\"instant\":true,\"msg\":\"") +
+                  (r.success ? "Training breach — you are ready" : "Held off. Try again") +
+                  "\"}");
+      return;
+    }
+    apiFail(400, "Not available on the training node");
+    return;
+  }
+
   // ── radio actions: fire and let the poll report the outcome (T3.5) ──
   if (!loraReady) { apiFail(503, "Radio offline"); return; }
-  uint32_t target = (uint32_t)strtoul(server.arg("id").c_str(), nullptr, 16);
   if (target == 0) { apiFail(400, "Bad target"); return; }
   KnownNode* n = findNode(target);
   if (!n) { apiFail(404, "Node not in range"); return; }

@@ -599,6 +599,9 @@ function render(){
           ' &middot; seq '+(n.reconScore||0)+'/'+(n.reconMax||10)+
           (n.odds>=0?' &middot; odds '+n.odds+'%':' &middot; odds unknown')+'</span>'+
         (lock?'<span class="xs mut">'+lock+'</span>':'')+'</div>'+
+      (n.training?'<div class="xs mut" style="margin-top:6px">'+
+        'Practice target. Scout it, watch your odds appear, then hack it. '+
+        'It disappears once you reach LVL 2.</div>':'')+
       (n.canHack===false?'<div class="xs mut" style="margin-top:6px">'+
         'Immune &mdash; WHITE can only attack BLACK and RED.</div>':'')+
       (n.canRecon===false?'<div class="xs mut" style="margin-top:6px">'+
