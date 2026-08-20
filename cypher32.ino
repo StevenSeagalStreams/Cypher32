@@ -144,8 +144,12 @@ int  consecutiveWin  = 0;
 unsigned long lastBattNudgeMs = 0;   // rate-limits the low-battery mood nudge
 unsigned long lastEventMs = 0;
 
-void shiftMood(int delta) {
+void shiftMood(int delta, const char* why) {
+  int before = cyMood;
   cyMood = constrain(cyMood + delta, -4, 4);
+  Serial.printf("[MOOD] %+d (%s): %d -> %d, lossStreak=%d\n",
+                delta, why ? why : "?", before, cyMood,
+                (delta < 0) ? consecutiveLoss + 1 : 0);
   lastEventMs = millis();
   consecutiveLoss = (delta < 0) ? consecutiveLoss + 1 : 0;
   consecutiveWin  = (delta > 0) ? consecutiveWin  + 1 : 0;
@@ -154,8 +158,10 @@ void shiftMood(int delta) {
 // Drift mood back toward 0 if nothing has happened for a while
 void driftMood() {
   if (millis() - lastEventMs > 300000UL) {  // 5 min of quiet
-    if (cyMood > 0) cyMood--;
-    else if (cyMood < 0) cyMood++;
+    if (cyMood != 0) {
+      cyMood += (cyMood > 0) ? -1 : +1;
+      Serial.printf("[MOOD] drift toward calm: now %d\n", cyMood);
+    }
     lastEventMs = millis();
   }
   // Low battery nudge.
@@ -169,7 +175,10 @@ void driftMood() {
   if (batteryPresent() && getBatteryPercent() < 20 &&
       (uint32_t)(millis() - lastBattNudgeMs) > 300000UL) {
     lastBattNudgeMs = millis();
-    if (cyMood > -2) cyMood--;
+    if (cyMood > -2) {
+      cyMood--;
+      Serial.printf("[MOOD] low battery: now %d\n", cyMood);
+    }
   }
 }
 
@@ -1130,9 +1139,12 @@ void displayAttacking(String tid) {
   drawFooter(); display.update();
 }
 
+// NOTE: these draw the screen and nothing else. They used to call shiftMood()
+// as a side effect, which meant the mood moved every time a screen was painted
+// rather than every time something happened — and callers that also adjusted
+// mood double-counted. Mood belongs to the event, not to the rendering.
 void displayHackSuccess(String tid, int xp, String note) {
   display.clearMemory(); display.landscape(); drawHeader();
-  shiftMood(+2);
   drawSprite(spr_victory, SPR_VICTORY_W, SPR_VICTORY_H, FACE_Y);
   { String nd="Node "+tid+" owned."; String xs="XP +"+String(xp);
   drawBubbleRight("SYSTEM BREACHED", nd.c_str(), xs.c_str(), note.c_str()); }
@@ -1141,7 +1153,6 @@ void displayHackSuccess(String tid, int xp, String note) {
 
 void displayHackFailed(String tid, int xp, String note) {
   display.clearMemory(); display.landscape(); drawHeader();
-  shiftMood(-2);
   drawSprite(spr_lost, SPR_LOST_W, SPR_LOST_H, FACE_Y);
   { String nd="Node "+tid+" held."; String xs="XP -"+String(xp);
   drawBubbleRight("COUNTER-HACKED", nd.c_str(), xs.c_str(), note.c_str()); }
@@ -1176,7 +1187,6 @@ void displayLevelUp() {
   drawSep(10);
   printCenter(2, "*** LEVEL UP! ***");
   drawSep(12);
-  shiftMood(+3);
   drawSprite(spr_victory, SPR_VICTORY_W, SPR_VICTORY_H, FACE_Y);
   { String ls="LVL "+String(myLevel)+" reached!";
   drawBubbleRight(ls.c_str(), "+1 SKILL POINT",
@@ -1530,6 +1540,8 @@ void resolveHackVerdict() {
   // outcome — they decided it — so this is a report, not the notification.
   if (loraReady) loraSendHackResult(target, won, (int8_t)constrain(result.xpDelta, -128, 127));
 
+  shiftMood(won ? +2 : -2, won ? "won a hack" : "lost a hack");
+
   bool lvlUp = false;
   if (won) {
     recordHack(nid);                       // 7-day lock
@@ -1542,7 +1554,8 @@ void resolveHackVerdict() {
   }
 
   saveProgress();
-  if (lvlUp) { displayLevelUp(); revertIdleAtMs = millis() + 6000; }
+  if (lvlUp) { shiftMood(+3, "levelled up"); displayLevelUp();
+               revertIdleAtMs = millis() + 6000; }
   else                            revertIdleAtMs = millis() + 4000;
 }
 
@@ -1769,6 +1782,8 @@ void loop() {
     String msg  = pendingMsg;
     String from = pendingMsgFrom;
     pendingMsg = ""; pendingMsgFrom = "";
+    Serial.printf("[MSG] from %s: \"%s\" (mood stays %d)\n",
+                  from.c_str(), msg.c_str(), cyMood);
     displayIncomingMsg(from, msg);
     revertIdleAtMs = millis() + 5000;
   }
@@ -1782,7 +1797,7 @@ void loop() {
   // ...or the target never answered. Say so rather than inventing a result.
   if (hackTimedOut) {
     hackTimedOut = false;
-    shiftMood(-1);
+    shiftMood(-1, "hack got no answer");
     displayHackFailed(hackPendingId, 0, "No response. Out of range?");
     revertIdleAtMs = millis() + 4000;
   }
@@ -1793,12 +1808,14 @@ void loop() {
   if (pendingHackAlert) {
     pendingHackAlert = false;
     String who = pendingHackFrom;
+    Serial.printf("[HACK] inbound attempt from %s — attacker %s\n",
+                  who.c_str(), pendingHackAttackerWon ? "won" : "was held off");
     if (pendingHackAttackerWon) {
-      shiftMood(-1);
+      shiftMood(-1, "breached by a peer");
       displayHackFailed(who, 0, "Breached by " + nodeNameFromId(
                           (uint32_t)strtoul(who.c_str(), nullptr, 16)));
     } else {
-      shiftMood(+1);
+      shiftMood(+1, "firewall held");
       displayHackSuccess(who, 0, "Firewall held.");
     }
     revertIdleAtMs = millis() + 5000;
