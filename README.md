@@ -177,9 +177,14 @@ Cap: **35** per skill (3 from faction + 32 earned through levels).
 Every successful hack earns XP. Enough and you level up. The climb gets steeper the higher you go.
 
 - **Max level:** 32
-- **XP threshold:** `currentLevel × 150`
+- **XP to clear a level:** `currentLevel × 10` — 10 at LVL 1, 100 at LVL 10,
+  310 at LVL 31. Each level costs more than the last.
 - **XP per hack:** `15 + target's Firewall × 5` — tougher targets pay more
 - XP floor is 0. At LVL 32, surplus XP is discarded.
+
+Reaching LVL 32 takes 4,960 XP, roughly 165 winning hacks. Early levels go
+quickly — one good hack can carry you through two or three at the start — and
+the climb lengthens steadily from there.
 
 ---
 

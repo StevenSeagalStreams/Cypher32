@@ -578,8 +578,13 @@ HackResult resolveHackOutcome(String enemyFaction, int enemyFW, bool defenderSay
 
 #define MAX_LEVEL 32
 
+// XP to clear the current level: 10 at LVL 1, 100 at LVL 10, +10 every level
+// after. The old curve was level x 150, which needed 74,000 XP to max out —
+// roughly 2,500 successful hacks, so nobody was ever going to see LVL 32.
+#define XP_PER_LEVEL 10
+
 int xpForNextLevel() {
-  return myLevel * 150;
+  return myLevel * XP_PER_LEVEL;
 }
 
 // Apply XP delta; return true if player levelled up
@@ -590,13 +595,20 @@ bool applyXP(int delta) {
     myXP = 0;  // cap at max level, no overflow
     return false;
   }
-  if (myXP >= xpForNextLevel()) {
+
+  // Loop, do not level once and stop. A hack pays 15-66 XP and LVL 1 now
+  // needs only 10, so a single award can clear several levels. The old
+  // single-step version would have stranded the surplus above the next
+  // threshold until the following hack.
+  bool levelled = false;
+  while (myLevel < MAX_LEVEL && myXP >= xpForNextLevel()) {
     myXP -= xpForNextLevel();
     myLevel++;
     skillPoints++;
-    return true;
+    levelled = true;
   }
-  return false;
+  if (myLevel >= MAX_LEVEL) myXP = 0;
+  return levelled;
 }
 
 
