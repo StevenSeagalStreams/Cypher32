@@ -164,9 +164,9 @@ One **Skill Point** per level-up. Spend it in the **Skills** tab. At high levels
 
 | Skill | Effect |
 |-------|--------|
-| **Brute Force** | Narrows the hack pool — raises hit probability per attempt |
+| **Brute Force** | +2% hit chance per point over the target's Firewall |
 | **Stealth** | +1% hit chance per point — and Firewall can't cancel it |
-| **Firewall** | Cuts XP lost when counter-hacked — floor is 5 XP |
+| **Firewall** | Cuts XP lost when your hack fails (floor 5), and blunts Brute Force aimed at you |
 
 Cap: **35** per skill (3 from faction + 32 earned through levels).
 
