@@ -117,7 +117,14 @@ ck(el("seqgrid").children.length===9,"3x3 grid built");
 ck(el("seqmax").textContent==="10","target sequence length shown");
 ck(el("seqmodal").className==="modal","mini-game opens on RECON");
 
-// play it honestly: read the generated sequence and repeat it
+var tiles=el("seqgrid").children;
+ck(listeners(tiles[0],"pointerdown")===1,
+   "tiles answer pointerdown, not click — click waits for release plus the "+
+   "browser's double-tap timeout, which is most of the lag");
+ck(pollIv===null,"the 2 s state poll is paused while the game is open");
+
+// play it honestly: read the generated sequence and repeat it, through the
+// real bound handler rather than by calling seqTap() behind its back
 seqBegin();
 flushTimers(80);                       // let round 1 finish flashing
 ck(seqOrder.length===1,"round 1 is one tile");
@@ -126,7 +133,17 @@ for(var round=0;round<10;round++){
   if(!seqAccepting)flushTimers(80);
   if(!seqAccepting)break;
   var target=seqOrder.slice();
-  for(var k=0;k<target.length;k++)seqTap(target[k]);
+  for(var k=0;k<target.length;k++){
+    var tile=tiles[target[k]], ev=press(tile,"pointerdown",1000+k*120);
+    if(k===0&&round===0){
+      ck(tile.className==="lit",
+         "the tile is lit in the same turn as the press, before any timer runs");
+      var at=seqAt;
+      press(tile,"click",1000);        // the synthetic click that trails a tap
+      ck(seqAt===at,"the trailing click does not count as a second press");
+      ck(ev.cancelable&&ev.preventDefault,"press events are preventable");
+    }
+  }
   reached=target.length;
   if(reached>=10)break;
   flushTimers(80);
@@ -158,6 +175,44 @@ seqTap(seqOrder[0]);                    // clear round 1
 flushTimers(80);
 if(seqAccepting){ seqTap((seqOrder[0]+1)%9); }   // fail round 2
 ck(seqBest===1,"failing round 2 keeps the score from round 1, got "+seqBest);
+
+// ── responsiveness ──
+// Two presses of the same tile in quick succession. The dedupe that swallows a
+// touch's compatibility mousedown must not swallow these, and the first
+// press's fade timer must not blank the second press's light.
+seqOpen("beef0004","Relay",10);
+seqOrder=[3,3,3];seqAt=0;seqAccepting=true;seqPlaying=true;
+var t3=el("seqgrid").children[3];
+press(t3,"pointerdown",5000);
+ck(seqAt===1,"first press registers");
+var alive1=__timers.filter(function(t){return t.alive}).length;
+press(t3,"pointerdown",5090);           // 90 ms later, same tile
+ck(seqAt===2,"a repeat press 90 ms later still counts, seqAt="+seqAt);
+ck(t3.className==="lit","the tile is lit after the second press");
+ck(__timers.filter(function(t){return t.alive}).length===alive1,
+   "the first press's fade timer was cancelled, not left to blank the second");
+
+// Old WebViews without pointer events fall back to touchstart, and must not
+// also fire on the compatibility mousedown that trails it.
+delete globalThis.PointerEvent;
+seqOpen("beef0005","Relay2",10);
+var t5=el("seqgrid").children[0];
+ck(listeners(t5,"touchstart")===1&&listeners(t5,"mousedown")===1,
+   "fallback path binds touchstart and mousedown");
+seqOrder=[0,0];seqAt=0;seqAccepting=true;seqPlaying=true;seqBest=0;
+var te=press(t5,"touchstart",9000);
+ck(te.defaultPrevented,"touchstart is prevented so the page cannot scroll away");
+press(t5,"mousedown",9300);             // the compatibility event
+ck(seqAt===1&&seqBest===0,
+   "the compatibility mousedown is not a second press, seqAt="+seqAt);
+globalThis.PointerEvent=function PointerEvent(){};
+
+// The poll pauses for the game and comes back afterwards.
+seqOpen("beef0006","Relay3",10);
+ck(!pollIv,"poll stopped on open");
+seqQuit();
+ck(!!pollIv,"poll resumes when the game closes");
+pollStop();
 
 console.log("\nhelpers: fmtLeft(7d)="+fmtLeft(604800000)+
             "  fmtLeft(11h22m)="+fmtLeft(40920000)+"  fmtAge(4.2s)="+fmtAge(4200));

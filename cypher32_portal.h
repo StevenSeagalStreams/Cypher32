@@ -20,7 +20,10 @@ static const char PORTAL_HTML[] PROGMEM = R"PORTAL(<!DOCTYPE html><html lang="en
 <head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Cypher32</title><style>
-*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+/* touch-action:manipulation everywhere kills double-tap-to-zoom detection, and
+   with it the 300 ms the browser otherwise waits before firing click. Pinch
+   zoom still works; only the tap delay goes. */
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent;touch-action:manipulation}
 body{margin:0;background:#05080a;color:#c8f5c8;font:14px/1.45 ui-monospace,"SF Mono",Menlo,Consolas,monospace;
  padding-bottom:calc(64px + env(safe-area-inset-bottom))}
 h1,h2,h3{margin:0 0 8px;font-weight:600;letter-spacing:.5px}
@@ -82,10 +85,14 @@ textarea{min-height:64px;resize:none}
  justify-content:center;padding:16px}
 .modal .card{max-width:380px;width:100%;margin:0}
 .seq{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:12px 0}
+/* No transition in the resting state: a tile must light on the very frame the
+   finger lands, with no 80 ms ramp in front of it. The ease is only on the way
+   back out, added with .fade at the moment the light is released. */
 .seq div{aspect-ratio:1;border:1px solid #24402f;border-radius:10px;background:#0a1013;
- cursor:pointer;transition:background .08s,border-color .08s}
+ cursor:pointer;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}
 .seq div.lit{background:#7dffa8;border-color:#7dffa8}
 .seq div.bad{background:#ff8080;border-color:#ff8080}
+.seq div.fade{transition:background .14s linear,border-color .14s linear}
 .seq.locked div{cursor:default}
 .seqhead{display:flex;justify-content:space-between;align-items:baseline}
 .seqhead b{font-size:22px;color:#7dffa8}
@@ -468,30 +475,73 @@ function wipe(){
 var seqTarget="",seqOrder=[],seqAt=0,seqBest=0,seqPlaying=false,seqAccepting=false;
 var SEQ_MAX=10;
 
+// A tile has to answer the finger, not the network and not the next repaint
+// after it. Three things were costing up to a second between press and light:
+//
+//   1. click fires on release, and only after the browser has ruled out a
+//      double-tap. pointerdown fires on contact. That is most of the gap.
+//   2. the 2 s /api/state poll kept running underneath the game, so a tap could
+//      land behind a JSON parse and a full re-render of every tab.
+//   3. an 80 ms CSS transition sat in front of the light coming on.
+//
+// Bind on pointerdown, fall back to touchstart/mousedown on old WebViews, and
+// swallow the synthetic click that follows so one press is never two taps.
+function seqBind(d,k){
+  var touched=0;
+  function hit(e){
+    var t=(e&&e.timeStamp)||0,ty=(e&&e.type)||"";
+    // Only the fallback path can double-report: a touchstart is followed by a
+    // compatibility mousedown. Suppress that one, and nothing else — a real
+    // second press on the same tile arrives as the same event type and must
+    // always count, however fast it comes.
+    if(ty==="mousedown"&&touched&&t-touched<700)return;
+    if(ty==="touchstart")touched=t;
+    if(e&&e.cancelable&&e.preventDefault)e.preventDefault();
+    seqTap(k);
+  }
+  if(typeof PointerEvent!=="undefined"){
+    d.addEventListener("pointerdown",hit);
+  }else{
+    d.addEventListener("touchstart",hit,{passive:false});
+    d.addEventListener("mousedown",hit);
+  }
+  d.addEventListener("click",function(e){if(e&&e.preventDefault)e.preventDefault()});
+}
+
 function seqOpen(id,name,max){
   seqTarget=id; SEQ_MAX=max||10;
   seqOrder=[];seqAt=0;seqBest=0;seqPlaying=false;seqAccepting=false;
+  pollStop();                       // nothing else may touch the DOM mid-game
   $("seqtarget").textContent=name;
   $("seqmax").textContent=String(SEQ_MAX);
   $("seqlen").textContent="0";
   $("seqmsg").textContent="Watch the sequence, then repeat it.";
   $("seqbtn").textContent="START";$("seqbtn").disabled=false;
   var g=$("seqgrid");g.className="seq";g.innerHTML="";
+  seqTimers={};
   for(var i=0;i<9;i++){
     var d=document.createElement("div");
     d.dataset.i=String(i);
-    d.onclick=(function(k){return function(){seqTap(k)}})(i);
+    seqBind(d,i);
     g.appendChild(d);
   }
   $("seqmodal").className="modal";
 }
-function seqQuit(){seqPlaying=false;seqAccepting=false;$("seqmodal").className="modal hide"}
+function seqQuit(){seqPlaying=false;seqAccepting=false;
+  $("seqmodal").className="modal hide";pollStart()}
 
 function seqTiles(){return $("seqgrid").children}
+var seqTimers={};
 function seqFlash(i,cls,ms){
   var t=seqTiles()[i]; if(!t)return;
+  // Per-tile timers: two quick taps on the same tile used to have the first
+  // one's timeout blank the second one's light, which reads as a missed press.
+  if(seqTimers[i])clearTimeout(seqTimers[i]);
   t.className=cls||"lit";
-  setTimeout(function(){t.className=""},ms||300);
+  seqTimers[i]=setTimeout(function(){
+    t.className="fade";
+    seqTimers[i]=setTimeout(function(){t.className="";delete seqTimers[i]},160);
+  },ms||300);
 }
 
 function seqBegin(){
@@ -522,14 +572,14 @@ function seqNextRound(){
 function seqTap(i){
   if(!seqAccepting)return;
   if(i!==seqOrder[seqAt]){ seqFail(i); return; }
-  seqFlash(i,"lit",160);
+  seqFlash(i,"lit",110);            // your own press only needs a blink back
   seqAt++;
   if(seqAt>=seqOrder.length){
     seqAccepting=false;
     seqBest=seqOrder.length;
     if(seqBest>=SEQ_MAX){ seqDone("Perfect run."); return; }
     $("seqmsg").textContent="Correct — next round.";
-    setTimeout(seqNextRound,700);
+    setTimeout(seqNextRound,450);
   }
 }
 function seqFail(i){
@@ -546,6 +596,7 @@ function seqDone(why){
   var id=seqTarget;
   setTimeout(function(){
     $("seqmodal").className="modal hide";
+    pollStart();
     act("recon",{id:id,score:seqBest});
   },1400);
 }
@@ -655,6 +706,15 @@ function refresh(){
   return fetch("/api/state").then(function(r){return r.json()})
     .then(function(j){S=j;render()}).catch(function(){})}
 
+// The poll is pausable. render() rebuilds every tab's markup, and on a phone
+// that is tens of milliseconds of main thread every two seconds — fine while
+// you are reading the radar, not fine while you are playing a timing game on
+// top of it. It also stops asking the ESP32 to serialise its whole state while
+// the radio is busy. Resumed the moment the mini-game closes.
+var pollIv=null;
+function pollStart(){if(!pollIv)pollIv=setInterval(refresh,2000)}
+function pollStop(){if(pollIv){clearInterval(pollIv);pollIv=null}}
+
 function loadDiag(){
   fetch("/api/diag").then(function(r){return r.json()}).then(function(d){
     $("diagbody").innerHTML=Object.keys(d).map(function(k){
@@ -671,5 +731,5 @@ function doPing(){var id=$("pingto").value;if(!id)return;
 $("mtxt").addEventListener("input",function(){
   $("mcount").textContent=this.value.length+" / 32"});
 
-refresh();setInterval(refresh,2000);
+refresh();pollStart();
 </script></body></html>)PORTAL";
