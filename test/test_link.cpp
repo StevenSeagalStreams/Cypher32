@@ -711,6 +711,51 @@ int main() {
            0xBBBB2222, nodeNameFromId(0xBBBB2222).c_str());
   }
 
+  // ── intel tiers ──
+  // The mini-game peels a target open a tier per round. Two things have to
+  // hold: the tier table is the only thing that decides what is visible, and
+  // intel handed out for free (someone messaging you, someone attacking you)
+  // must never also hand out the hack-odds bonus that only a real run earns.
+  {
+    printf("\nintel tiers\n");
+    resetAll(); myChipID32 = 0x1000A0A0;
+    KnownNode* n = touchNode(0xDEAD0001);
+    CHECK(n != nullptr, "node created");
+
+    CHECK(!reconKnows(n, RECON_T_NAME),  "an unscouted contact has no name");
+    CHECK(!reconKnows(n, RECON_T_LEVEL), "and no level");
+
+    // The published tier order is the contract the portal and the radar both
+    // read: strictly increasing, and topping out exactly at a perfect run.
+    CHECK(RECON_T_NAME    < RECON_T_FACTION &&
+          RECON_T_FACTION < RECON_T_LEVEL   &&
+          RECON_T_LEVEL   < RECON_T_BRUTE   &&
+          RECON_T_BRUTE   < RECON_T_STEALTH &&
+          RECON_T_STEALTH < RECON_T_FIREWALL&&
+          RECON_T_FIREWALL< RECON_T_PWNED,   "tiers are strictly increasing");
+    CHECK(RECON_T_PWNED == RECON_MAX_SEQ, "the backdoor costs a perfect run");
+
+    n->intel = RECON_T_FACTION;
+    CHECK(reconKnows(n, RECON_T_NAME),     "tier 4 includes the name from tier 2");
+    CHECK(reconKnows(n, RECON_T_FACTION),  "and the faction it paid for");
+    CHECK(!reconKnows(n, RECON_T_LEVEL),   "but not the level at tier 6");
+
+    // A free reveal is intel, not progress.
+    n->intel = 0; n->recon_score = 0;
+    reconAtLeast(n, RECON_T_NAME);
+    CHECK(n->intel == RECON_T_NAME, "being messaged identifies the sender");
+    CHECK(n->recon_score == 0,      "but earns no sequence score");
+    CHECK(loraHackChancePct(10, n->recon_score, 3, 5) ==
+          loraHackChancePct(10, 0, 3, 5),
+          "and therefore no hack-odds bonus");
+
+    reconAtLeast(n, RECON_T_NAME);         // a second message changes nothing
+    CHECK(n->intel == RECON_T_NAME, "repeat contact does not climb the tiers");
+    n->intel = RECON_T_PWNED;
+    reconAtLeast(n, RECON_T_NAME);
+    CHECK(n->intel == RECON_T_PWNED, "and never walks a tier back down");
+  }
+
   printf("\n%d checks, %d failures\n", checks, failures);
   return failures ? 1 : 0;
 }

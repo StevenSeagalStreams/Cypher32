@@ -251,6 +251,7 @@ String myFaction   = "NONE";
 // (bootEpoch) in preferences so timestamps survive reboots.
 String hackedList = "";
 String failList   = "";   // 12 h retry cooldowns (T4.4)
+String pwnedList  = "";   // backdoors, which outlive both of the above
 String hackPendingId = "";   // target of the hack currently awaiting a verdict
 
 // 7 days in milliseconds
@@ -277,7 +278,8 @@ void requestRestart(uint32_t inMs) { restartPending = true; restartAtMs = millis
 //  writes are the one thing that wears out on this board.
 #define EVENT_LOG_SIZE 20
 enum EvType { EV_DISCOVER, EV_SCOUTED, EV_RECON, EV_HACK_WON, EV_HACK_LOST,
-              EV_BREACHED, EV_HELD, EV_MSG_IN, EV_MSG_OUT, EV_LEVEL, EV_TRAIN };
+              EV_BREACHED, EV_HELD, EV_MSG_IN, EV_MSG_OUT, EV_LEVEL, EV_TRAIN,
+              EV_PWNED };
 struct GameEvent {
   uint8_t       type;
   uint32_t      peer;      // 0 when there is no other party
@@ -308,6 +310,7 @@ const char* evName(uint8_t t) {
     case EV_MSG_OUT:   return "message to";
     case EV_LEVEL:     return "levelled up";
     case EV_TRAIN:     return "training";
+    case EV_PWNED:     return "backdoored";
   }
   return "?";
 }
@@ -410,6 +413,7 @@ void saveProgress() {
   preferences.putString("fac",    myFaction);
   preferences.putString("hacked", hackedList);
   preferences.putString("failed", failList);
+  preferences.putString("pwned",  pwnedList);
   preferences.putInt("lvl",    myLevel);
   preferences.putInt("xp",     myXP);
   preferences.putInt("sp",     skillPoints);
@@ -434,6 +438,7 @@ void loadProgress() {
   myFaction     = preferences.getString("fac",    "NONE");
   hackedList    = preferences.getString("hacked", "");
   failList      = preferences.getString("failed", "");
+  pwnedList     = preferences.getString("pwned",  "");
   myLevel       = preferences.getInt("lvl",    1);
   myXP          = preferences.getInt("xp",     0);
   skillPoints   = preferences.getInt("sp",     0);
@@ -508,6 +513,57 @@ void listPrune(String& list, unsigned long window) {
   list = fresh;
 }
 
+// ── backdoors ────────────────────────────────
+// A perfect recon run is the one piece of progress against another player that
+// is meant to outlast everything: the lock, the node ageing out of range, and a
+// power cycle. The node table is RAM only, so the backdoor list lives in NVS
+// beside the cooldowns, in the same shape.
+//
+//   Format: "id:brute:stealth:firewall,"
+//
+// The numbers ride along so a rebooted device can still show the file it owns.
+// They go stale, which is exactly what re-entry is for — and re-entry on a
+// backdoored node costs neither an attempt nor a game.
+#define MAX_BACKDOORS 12
+
+void recordBackdoor(const String& id, uint8_t br, uint8_t st, uint8_t fw) {
+  int start = pwnedList.indexOf(id + ":");
+  if (start != -1) {
+    int comma = pwnedList.indexOf(",", start);
+    if (comma != -1) pwnedList.remove(start, comma - start + 1);
+  }
+  pwnedList += id + ":" + String(br) + ":" + String(st) + ":" + String(fw) + ",";
+  // Oldest out first, so a long-running device does not grow this without end.
+  int entries = 0;
+  for (unsigned k = 0; k < pwnedList.length(); k++) if (pwnedList[k] == ',') entries++;
+  while (entries-- > MAX_BACKDOORS) pwnedList.remove(0, pwnedList.indexOf(',') + 1);
+}
+
+// Re-attach the backdoors we own to whichever nodes are back in range. Cheap
+// enough to run on the same 5 s tick as the cooldown prune.
+void serviceBackdoors() {
+  if (pwnedList.length() == 0) return;
+  for (int i = 0; i < knownCount; i++) {
+    KnownNode* n = &knownNodes[i];
+    if (n->pwned) continue;
+    String id = chipIdStr(n->chip_id);
+    int start = pwnedList.indexOf(id + ":");
+    if (start == -1) continue;
+    int comma = pwnedList.indexOf(",", start);
+    if (comma == -1) continue;
+    String e = pwnedList.substring(start + id.length() + 1, comma);
+    int c1 = e.indexOf(':'), c2 = e.lastIndexOf(':');
+    if (c1 == -1 || c2 == c1) continue;
+    n->pwned         = true;
+    n->intel         = RECON_MAX_SEQ;
+    n->recon_score   = RECON_MAX_SEQ;
+    n->seen_brute    = (uint8_t)e.substring(0, c1).toInt();
+    n->seen_stealth  = (uint8_t)e.substring(c1 + 1, c2).toInt();
+    n->seen_firewall = (uint8_t)e.substring(c2 + 1).toInt();
+    Serial.printf("[RECON] backdoor restored on %s\n", id.c_str());
+  }
+}
+
 bool recentlyHacked(String id) { return listHas(hackedList, id, OWNED_LOCK_MS); }
 void recordHack(String id)     { listRecord(hackedList, id); }
 bool recentlyFailed(String id) { return listHas(failList, id, FAIL_LOCK_MS); }
@@ -556,11 +612,30 @@ void serviceReconResets() {
 
     n->hack_attempted = false;
     n->recon_count    = 0;
-    n->recon_score    = 0;
-    memset(n->recon_types,  0, sizeof(n->recon_types));
-    memset(n->recon_values, 0, sizeof(n->recon_values));
+    // A perfect run left a backdoor open. Everything else fades: three fresh
+    // attempts, and the dossier goes back to a signal with no name on it.
+    if (n->pwned) {
+      Serial.printf("[RECON] %s lock expired — backdoor holds\n", nid.c_str());
+      continue;
+    }
+    n->recon_score   = 0;
+    n->intel         = 0;
+    n->seen_brute    = 0;
+    n->seen_stealth  = 0;
+    n->seen_firewall = 0;
     Serial.printf("[RECON] %s lock expired — 3 fresh attempts\n", nid.c_str());
   }
+}
+
+// What we are allowed to call a node. A codename is itself intel: until recon
+// reaches RECON_T_NAME, the radar, the event log and the screen all say the
+// same thing, which is that we do not know who this is. A node that has fallen
+// out of the table keeps its name — we only ever learned it by engaging it.
+String nodeDisplayName(uint32_t id) {
+  KnownNode* n = findNode(id);
+  if (n && !reconKnows(n, RECON_T_NAME))
+    return "UNKNOWN-" + chipIdStr(id).substring(4);
+  return nodeNameFromId(id);
 }
 
 // ─────────────────────────────────────────────
@@ -1257,7 +1332,7 @@ void displayIncomingMsg(String fromId, String msg) {
   display.clearMemory(); display.landscape(); drawHeader();
   drawSprite(spr_idle1, SPR_IDLE1_W, SPR_IDLE1_H, FACE_Y);
   uint32_t fid = (uint32_t)strtoul(fromId.c_str(), nullptr, 16);
-  String senderName = nodeNameFromId(fid);
+  String senderName = nodeDisplayName(fid);
   String nameStr = "MSG: " + senderName;
   // Truncate message to fit bubble (max ~26 chars per line)
   String line1 = msg.length() > 26 ? msg.substring(0, 26) : msg;
@@ -1297,14 +1372,20 @@ void displayWiping() {
 // screen rather than a line in a list.
 void displayNewNode(uint32_t id, uint8_t lvl, char fac) {
   displayRefreshes++;
+  KnownNode* n = findNode(id);
   display.clearMemory(); display.landscape();
   printCenter(16, "// NODE DETECTED");
   drawSep(28);
-  String name = nodeNameFromId(id);
   display.setTextSize(2);
-  printCenter(42, name);
+  printCenter(42, nodeDisplayName(id));
   display.setTextSize(1);
-  String sub = "LVL " + String(lvl) + "   " + factionName(fac);
+  // A contact you have not scouted is a signal, not a person. Show what the
+  // radio actually told us — how close they are — and let recon do the rest.
+  String sub = reconKnows(n, RECON_T_LEVEL)
+                 ? "LVL " + String(lvl) + "   " + factionName(fac)
+             : reconKnows(n, RECON_T_FACTION)
+                 ? "LVL ?   " + factionName(fac)
+                 : String(n ? nodeProximity(n) : "IN RANGE");
   printCenter(72, sub);
   printCenter(92, "192.168.4.1 to scout");
   display.update();
@@ -1457,13 +1538,28 @@ String buildStateJson() {
   j += "\"pending\":"    + String((loraActionPending() || hackInFlight) ? "true" : "false");
   j += "},";
 
+  // The mini-game watches this to know when the target has answered and the
+  // dossier is staged, or when to admit it never will.
+  j += "\"probe\":{\"id\":\"" + chipIdStr(reconProbe.target) + "\",";
+  j += "\"state\":\""         + String(loraReconProbeState()) + "\"},";
+
   j += "\"nodes\":[";
   bool wroteNode = false;
   if (trainingActive()) {
     wroteNode = true;
-    int fwKnownT = (trainRecon >= 3) ? TRAIN_FIREWALL : -1;
-    j += "{\"id\":\"00000001\",\"name\":\"TRAINING\",\"level\":1,";
-    j += "\"faction\":\"G\",\"avgRssi\":-40,\"bars\":4,";
+    // The dummy plays by exactly the same tier rules, because learning them is
+    // the whole point of it.
+    int fwKnownT = (trainScore >= RECON_T_FIREWALL) ? TRAIN_FIREWALL : -1;
+    j += "{\"id\":\"00000001\",";
+    j += "\"name\":\"" + String(trainScore >= RECON_T_NAME ? "TRAINING" : "UNKNOWN-0001") + "\",";
+    j += "\"level\":"    + String(trainScore >= RECON_T_LEVEL ? 1 : 0) + ",";
+    j += "\"faction\":\""+ String(trainScore >= RECON_T_FACTION ? "G" : "?") + "\",";
+    j += "\"brute\":"    + String(trainScore >= RECON_T_BRUTE    ? TRAIN_BRUTE    : -1) + ",";
+    j += "\"stealth\":"  + String(trainScore >= RECON_T_STEALTH  ? TRAIN_STEALTH  : -1) + ",";
+    j += "\"firewall\":" + String(trainScore >= RECON_T_FIREWALL ? TRAIN_FIREWALL : -1) + ",";
+    j += "\"intel\":"    + String(trainScore) + ",";
+    j += "\"pwned\":"    + String(trainScore >= RECON_T_PWNED ? "true" : "false") + ",";
+    j += "\"avgRssi\":-40,\"bars\":4,";
     j += "\"proximity\":\"SIMULATED\",\"status\":\"ACTIVE\",\"ageMs\":0,";
     j += "\"recon\":"      + String(trainRecon) + ",";
     j += "\"reconScore\":" + String(trainScore) + ",";
@@ -1481,10 +1577,17 @@ String buildStateJson() {
     String nid = chipIdStr(n->chip_id);
     if (wroteNode) j += ",";
     wroteNode = true;
+    // Everything below the intel tier is withheld, not faked. -1 and "?" mean
+    // "not scouted yet" and the portal draws them as blanks to be filled in.
     j += "{\"id\":\""       + nid + "\",";
-    j += "\"name\":\""      + jesc(nodeNameFromId(n->chip_id)) + "\",";
-    j += "\"level\":"       + String(n->level) + ",";
-    j += "\"faction\":\""   + String(n->faction) + "\",";
+    j += "\"name\":\""      + jesc(nodeDisplayName(n->chip_id)) + "\",";
+    j += "\"level\":"       + String(reconKnows(n, RECON_T_LEVEL) ? n->level : 0) + ",";
+    j += "\"faction\":\""   + String(reconKnows(n, RECON_T_FACTION) ? n->faction : '?') + "\",";
+    j += "\"brute\":"       + String(reconKnows(n, RECON_T_BRUTE)    ? n->seen_brute    : -1) + ",";
+    j += "\"stealth\":"     + String(reconKnows(n, RECON_T_STEALTH)  ? n->seen_stealth  : -1) + ",";
+    j += "\"firewall\":"    + String(reconKnows(n, RECON_T_FIREWALL) ? n->seen_firewall : -1) + ",";
+    j += "\"intel\":"       + String(n->intel) + ",";
+    j += "\"pwned\":"       + String(n->pwned ? "true" : "false") + ",";
     j += "\"avgRssi\":"     + String(nodeAvgRssi(n)) + ",";
     j += "\"bars\":"        + String(nodeSignalBars(n)) + ",";
     j += "\"proximity\":\"" + String(nodeProximity(n)) + "\",";
@@ -1495,15 +1598,20 @@ String buildStateJson() {
     j += "\"reconMax\":"    + String(RECON_MAX_SEQ) + ",";
     j += "\"hackWon\":"     + String(recentlyHacked(nid) ? "true" : "false") + ",";
     j += "\"cooldownMs\":"  + String(hackCooldownLeft(nid)) + ",";
-    j += "\"canHack\":"     + String(canAttackFaction(n->faction) ? "true" : "false") + ",";
-    j += "\"canRecon\":"    + String((hackCooldownLeft(nid) == 0 && n->recon_count < 3)
+    // Judged on the faction we are allowed to see, not the real one: greying
+    // out HACK on an unscouted node would tell a WHITE player their faction
+    // for free, which is what round 4 is for.
+    j += "\"canHack\":"     + String(canAttackFaction(
+             reconKnows(n, RECON_T_FACTION) ? n->faction : '?') ? "true" : "false") + ",";
+    // A backdoored node costs nothing to look at again — that is what the
+    // perfect run bought. Everyone else gets three attempts per lock window.
+    j += "\"canRecon\":"    + String((hackCooldownLeft(nid) == 0 &&
+                                      (n->pwned || n->recon_count < 3))
                                        ? "true" : "false") + ",";
     // Real odds, but only once recon has actually revealed their firewall.
     // Guessing a number here would be worse than admitting we do not know:
     // finding out is what recon is for.
-    int fwKnown = -1;
-    for (int k = 0; k < n->recon_count; k++)
-      if (n->recon_types[k] == STAT_FIREWALL) fwKnown = n->recon_values[k];
+    int fwKnown = reconKnows(n, RECON_T_FIREWALL) ? (int)n->seen_firewall : -1;
     j += "\"odds\":" + String(fwKnown < 0 ? -1
            : loraHackChancePct(skillBrute, n->recon_score, skillStealth, fwKnown)) + ",";
     j += "\"unread\":"      + String(n->msg_unread ? "true" : "false") + ",";
@@ -1519,7 +1627,7 @@ String buildStateJson() {
     GameEvent& e = eventLog[idx];
     if (k) j += ",";
     j += "{\"t\":\""   + String(evName(e.type)) + "\",";
-    j += "\"who\":\""  + String(e.peer ? jesc(nodeNameFromId(e.peer)) : String("")) + "\",";
+    j += "\"who\":\""  + String(e.peer ? jesc(nodeDisplayName(e.peer)) : String("")) + "\",";
     j += "\"xp\":"      + String(e.xp) + ",";
     j += "\"ageMs\":"   + String(ageMs(e.at)) + "}";
   }
@@ -1530,6 +1638,88 @@ String buildStateJson() {
 void handleApiState() {
   server.sendHeader("Cache-Control", "no-store");
   server.send(200, "application/json", buildStateJson());
+}
+
+// GET /api/reveal?n=<round just cleared>
+//
+// One tier, handed over the moment the round that paid for it lands. Reveal is
+// also commit: if the phone dies mid-game the player keeps every tier they had
+// already earned, which is what anyone would expect after watching it appear
+// on screen. Tiers that unlock nothing return just their number, so the portal
+// can call this unconditionally and stay dumb about the tier table.
+void handleApiReveal() {
+  server.sendHeader("Cache-Control", "no-store");
+  // Reveal is also commit, so it is a mutation and needs the password like any
+  // other. It is a GET only because it sits inside the game loop.
+  if (server.arg("pw") != myPassword) {
+    server.send(401, "application/json", "{\"err\":\"Wrong password\"}");
+    return;
+  }
+  if (reconProbe.state != RECON_PROBE_READY) {
+    server.send(409, "application/json", "{\"err\":\"No dossier staged\"}");
+    return;
+  }
+  int t = server.arg("n").toInt();
+  if (t < 1)               t = 1;
+  if (t > RECON_MAX_SEQ)   t = RECON_MAX_SEQ;
+
+  uint32_t   id = reconProbe.target;
+  KnownNode* n  = findNode(id);
+  bool  training = (id == TRAINING_ID);
+
+  // The attempt is spent on the first piece of intel, not on opening the modal
+  // — a target that never answered, or a run that died in round one, costs
+  // nothing. A backdoored node costs nothing either; that is the whole prize.
+  if (!reconProbe.charged) {
+    reconProbe.charged = true;
+    if (training)                 trainRecon++;
+    else if (n && !n->pwned)      n->recon_count++;
+  }
+
+  if (training) {
+    if (t > trainScore) trainScore = (uint8_t)t;
+  } else if (n) {
+    if (t > n->recon_score) n->recon_score = (uint8_t)t;
+    if (t > n->intel)       n->intel       = (uint8_t)t;
+    if (t >= RECON_T_BRUTE)    n->seen_brute    = reconProbe.brute;
+    if (t >= RECON_T_STEALTH)  n->seen_stealth  = reconProbe.stealth;
+    if (t >= RECON_T_FIREWALL) n->seen_firewall = reconProbe.firewall;
+    if (t >= RECON_T_PWNED) {
+      if (!n->pwned) {
+        n->pwned = true;
+        logEvent(EV_PWNED, id, 0);
+        shiftMood(+2, "left a backdoor open");
+      }
+      // Persisted, so the one thing that is meant to last actually does.
+      recordBackdoor(chipIdStr(id), reconProbe.brute, reconProbe.stealth,
+                     reconProbe.firewall);
+      saveProgress();
+    }
+  }
+
+  String j = "{\"n\":" + String(t);
+  if      (t == RECON_T_NAME)
+    j += ",\"field\":\"name\",\"label\":\"CODENAME\",\"value\":\"" +
+         jesc(training ? String("TRAINING") : nodeNameFromId(id)) + "\"";
+  else if (t == RECON_T_FACTION)
+    j += ",\"field\":\"faction\",\"label\":\"FACTION\",\"value\":\"" +
+         String(reconProbe.faction) + "\"";
+  else if (t == RECON_T_LEVEL)
+    j += ",\"field\":\"level\",\"label\":\"LEVEL\",\"value\":\"" +
+         String(reconProbe.level) + "\"";
+  else if (t == RECON_T_BRUTE)
+    j += ",\"field\":\"brute\",\"label\":\"BRUTE\",\"value\":\"" +
+         String(reconProbe.brute) + "\"";
+  else if (t == RECON_T_STEALTH)
+    j += ",\"field\":\"stealth\",\"label\":\"STEALTH\",\"value\":\"" +
+         String(reconProbe.stealth) + "\"";
+  else if (t == RECON_T_FIREWALL)
+    j += ",\"field\":\"firewall\",\"label\":\"FIREWALL\",\"value\":\"" +
+         String(reconProbe.firewall) + "\"";
+  else if (t == RECON_T_PWNED)
+    j += ",\"field\":\"pwned\",\"label\":\"BACKDOOR\",\"value\":\"OPEN\"";
+  j += "}";
+  server.send(200, "application/json", j);
 }
 
 static void apiFail(int code, const String& msg) {
@@ -1624,13 +1814,16 @@ void handleApiAction() {
 
     if (a == "recon") {
       if (trainRecon >= 3) { apiFail(400, "Practice recon spent — try the hack"); return; }
-      int score = server.arg("score").toInt();
-      if (score < 0)             score = 0;
-      if (score > RECON_MAX_SEQ) score = RECON_MAX_SEQ;
-      if (score > trainScore) trainScore = (uint8_t)score;
-      trainRecon++;
+      // No radio, no wait: the dummy's dossier is on this device already.
+      loraReconProbeLocal(TRAINING_ID, 1, 'G',
+                          TRAIN_BRUTE, TRAIN_STEALTH, TRAIN_FIREWALL);
+      apiOk("Link up — practice target");
+      return;
+    }
+    if (a == "reconend") {
       logEvent(EV_TRAIN, 0, 0);
-      apiOk("Recon logged — sequence " + String(score));
+      reconProbe.state = RECON_PROBE_IDLE;
+      apiOk("Practice run logged — sequence " + String(trainScore));
       return;
     }
     if (a == "hack") {
@@ -1672,31 +1865,38 @@ void handleApiAction() {
   if (!n) { apiFail(404, "Node not in range"); return; }
   String nid0 = chipIdStr(target);
 
+  // Recon is two calls now. This one opens the link and parks the target's
+  // dossier; /api/reveal draws it down a tier at a time as rounds are cleared;
+  // "reconend" closes the run out. Splitting it this way is what lets the
+  // target come apart on screen while the player is still playing.
   if (a == "recon") {
     // No scouting while the node is locked. The lock expiring is what hands
     // back the three attempts, so playing during it would defeat the reset.
     if (hackCooldownLeft(nid0) > 0) {
       apiFail(400, "Locked out — wait for the cooldown"); return;
     }
-    if (n->recon_count >= 3)  {
+    if (!n->pwned && n->recon_count >= 3)  {
       apiFail(400, "Recon spent — hack it, or wait for the cooldown"); return;
     }
     if (loraActionPending())  { apiFail(429, "Another action in flight"); return; }
 
-    // The sequence-memory result from the portal. Keep the best run against
-    // this node — a later, worse attempt should not undo a good one, or
-    // players would be punished for scouting again to reveal another stat.
+    loraReconProbeStart(target);
+    loraSendRecon(target);
+    Serial.printf("[RECON] probing %s\n", nid0.c_str());
+    server.send(200, "application/json", "{\"ok\":true,\"probe\":true}");
+    return;
+  }
+  if (a == "reconend") {
     int score = server.arg("score").toInt();
     if (score < 0)             score = 0;
     if (score > RECON_MAX_SEQ) score = RECON_MAX_SEQ;
-    if (score > n->recon_score) n->recon_score = (uint8_t)score;
-    Serial.printf("[RECON] %s sequence %d (best %u) -> +%d%% odds\n",
-                  chipIdStr(target).c_str(), score, n->recon_score,
+    Serial.printf("[RECON] %s run ended at %d (best %u, intel %u) -> +%d%% odds\n",
+                  nid0.c_str(), score, n->recon_score, n->intel,
                   (n->recon_score * RECON_MAX_BONUS) / RECON_MAX_SEQ);
-
-    logEvent(EV_RECON, target, score);
-    loraSendRecon(target);
-    server.send(200, "application/json", "{\"ok\":true}");
+    if (score > 0) logEvent(EV_RECON, target, score);
+    if (n->pwned)  shiftMood(+1, "walked back in through a backdoor");
+    reconProbe.state = RECON_PROBE_IDLE;
+    apiOk("Recon logged — sequence " + String(score));
     return;
   }
   if (a == "hack") {
@@ -1973,6 +2173,7 @@ void setup() {
 
   server.on("/",            handleRoot);
   server.on("/api/state",   HTTP_GET,  handleApiState);
+  server.on("/api/reveal",  HTTP_GET,  handleApiReveal);
   server.on("/api/action",  HTTP_POST, handleApiAction);
   server.on("/api/setup",   HTTP_POST, handleApiSetup);
   server.on("/api/diag",    HTTP_GET,  handleApiDiag);
@@ -2086,8 +2287,7 @@ void loop() {
     logEvent(pendingHackAttackerWon ? EV_BREACHED : EV_HELD, whoId, 0);
     if (pendingHackAttackerWon) {
       shiftMood(-1, "breached by a peer");
-      displayHackFailed(who, 0, "Breached by " + nodeNameFromId(
-                          (uint32_t)strtoul(who.c_str(), nullptr, 16)));
+      displayHackFailed(who, 0, "Breached by " + nodeDisplayName(whoId));
     } else {
       shiftMood(+1, "firewall held");
       displayHackSuccess(who, 0, "Firewall held.");
@@ -2107,6 +2307,11 @@ void loop() {
     if (idleNeedsRefresh()) displayIdle();
   }
 
+  // A recon probe that never gets an answer has to time out on its own clock,
+  // or the portal sits on "ESTABLISHING LINK" forever against a target that
+  // walked out of range.
+  loraServiceReconProbe();
+
   // Prune stale hack records, and hand back recon attempts on any node whose
   // lock has just expired. Checked often enough that the Radar refreshes
   // within a few seconds of a cooldown ending.
@@ -2115,5 +2320,6 @@ void loop() {
     lastPrune = millis();
     pruneHackedList();
     serviceReconResets();
+    serviceBackdoors();
   }
 }

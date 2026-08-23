@@ -169,6 +169,59 @@ uint8_t   hackVerdictFirewall = 0;
 char      hackVerdictFaction  = '?';
 bool      hackTimedOut        = false;   // target never answered
 
+// ── Staged recon dossier ─────────────────────
+// The mini-game needs the target's numbers in hand before the player has
+// finished earning them, so a recon probe parks the whole reply here and the
+// portal draws down one tier per round it clears. Nothing reaches the browser
+// until a round pays for it.
+#define RECON_PROBE_IDLE   0
+#define RECON_PROBE_WAIT   1
+#define RECON_PROBE_READY  2
+#define RECON_PROBE_FAILED 3
+#define RECON_PROBE_MS     9000UL    // give up on a silent target
+
+struct ReconProbe {
+  uint32_t      target;
+  uint8_t       state;
+  unsigned long deadline;
+  bool          charged;    // has this run cost the player an attempt yet
+  uint8_t       level, brute, stealth, firewall;
+  char          faction;
+};
+ReconProbe reconProbe = {0, RECON_PROBE_IDLE, 0, false, 0, 0, 0, 0, '?'};
+
+void loraReconProbeStart(uint32_t target) {
+  reconProbe.target   = target;
+  reconProbe.state    = RECON_PROBE_WAIT;
+  reconProbe.deadline = millis() + RECON_PROBE_MS;
+  reconProbe.charged  = false;
+}
+// Answer a probe from local data — the training dummy, which has to teach the
+// whole loop with nobody else in the room.
+void loraReconProbeLocal(uint32_t target, uint8_t lvl, char fac,
+                         uint8_t br, uint8_t st, uint8_t fw) {
+  loraReconProbeStart(target);
+  reconProbe.level = lvl; reconProbe.faction = fac;
+  reconProbe.brute = br;  reconProbe.stealth = st; reconProbe.firewall = fw;
+  reconProbe.state = RECON_PROBE_READY;
+}
+const char* loraReconProbeState() {
+  switch (reconProbe.state) {
+    case RECON_PROBE_WAIT:   return "wait";
+    case RECON_PROBE_READY:  return "ready";
+    case RECON_PROBE_FAILED: return "failed";
+    default:                 return "idle";
+  }
+}
+// Called from loop(). A probe that never gets an answer has to fail on its own
+// clock: the link layer's retries are about frames, not about whether a player
+// is sitting in front of a modal waiting to be told the target is out of range.
+void loraServiceReconProbe() {
+  if (reconProbe.state == RECON_PROBE_WAIT &&
+      (long)(millis() - reconProbe.deadline) >= 0)
+    reconProbe.state = RECON_PROBE_FAILED;
+}
+
 extern uint32_t myChipID32;
 extern String   myFaction;
 extern int      myLevel;
@@ -686,12 +739,13 @@ void loraHandlePacket(uint8_t* buf, int len) {
     }
     case PKT_RECON_REQ: {
       if (len < (int)sizeof(PktReconReq)) return;
-      uint8_t stats[3] = {(uint8_t)skillBrute,(uint8_t)skillStealth,(uint8_t)skillFirewall};
-      uint8_t types[3] = {STAT_BRUTE,STAT_STEALTH,STAT_FIREWALL};
-      int pick = random(0,3);
       PktReconReply reply;
       fillHdr(&reply.hdr, PKT_RECON_REPLY, hdr->from_id);
-      reply.stat_type = types[pick]; reply.stat_value = stats[pick];
+      reply.level    = (uint8_t)myLevel;
+      reply.faction  = myFaction.length() > 0 ? myFaction.charAt(0) : '?';
+      reply.brute    = (uint8_t)skillBrute;
+      reply.stealth  = (uint8_t)skillStealth;
+      reply.firewall = (uint8_t)skillFirewall;
       deferReply(&reply, sizeof(reply));
       touchNode(hdr->from_id);
       qPush(scoutedQ, &scoutedHead, scoutedTail, hdr->from_id);   // they scouted us
@@ -702,12 +756,21 @@ void loraHandlePacket(uint8_t* buf, int len) {
       PktReconReply* p = (PktReconReply*)buf;
       KnownNode* n = touchNode(p->hdr.from_id);
       if (!n) return;
-      for (int i = 0; i < n->recon_count; i++)
-        if (n->recon_types[i] == p->stat_type) return;   // already know this stat
-      if (n->recon_count < 3) {
-        n->recon_types[n->recon_count]  = p->stat_type;
-        n->recon_values[n->recon_count] = p->stat_value;
-        n->recon_count++;
+      n->level   = p->level;
+      n->faction = (char)p->faction;
+      // Stage it. Nothing is written into the node record here — the tiers the
+      // player earns do that, one round at a time.
+      if (reconProbe.state == RECON_PROBE_WAIT &&
+          reconProbe.target == p->hdr.from_id) {
+        reconProbe.level    = p->level;
+        reconProbe.faction  = (char)p->faction;
+        reconProbe.brute    = p->brute;
+        reconProbe.stealth  = p->stealth;
+        reconProbe.firewall = p->firewall;
+        reconProbe.state    = RECON_PROBE_READY;
+        LORA_LOG("recon dossier from %08lx: L%u %c b%u s%u f%u",
+                 (unsigned long)p->hdr.from_id, p->level, (char)p->faction,
+                 p->brute, p->stealth, p->firewall);
       }
       break;
     }
@@ -739,6 +802,10 @@ void loraHandlePacket(uint8_t* buf, int len) {
 
       // Alert here rather than on HACK_RESULT: a modified attacker can decline
       // to send HACK_RESULT, but cannot stop us knowing we were attacked.
+      // Someone who kicks your door in has introduced themselves. Free name,
+      // no odds bonus — reconAtLeast() exists to keep those two apart.
+      reconAtLeast(findNode(hdr->from_id), RECON_T_NAME);
+
       pendingHackAlert       = true;
       pendingHackFrom        = chipIdStr(hdr->from_id);
       pendingHackAttackerWon = attackerWins;
@@ -749,15 +816,12 @@ void loraHandlePacket(uint8_t* buf, int len) {
       PktHackReply* p = (PktHackReply*)buf;
       KnownNode* n = touchNode(p->hdr.from_id);
       if (!n) return;
-      n->faction = (char)p->faction;
-      bool haveFw = false;
-      for (int i = 0; i < n->recon_count; i++)
-        if (n->recon_types[i] == STAT_FIREWALL) haveFw = true;
-      if (!haveFw && n->recon_count < 3) {
-        n->recon_types[n->recon_count]  = STAT_FIREWALL;
-        n->recon_values[n->recon_count] = p->firewall;
-        n->recon_count++;
-      }
+      n->faction      = (char)p->faction;
+      n->seen_firewall = p->firewall;   // straight from the fight; keeps a
+                                        // backdoored node's number current
+      // You engaged them, so you know who and what they are. The rest of the
+      // dossier still has to be played for.
+      reconAtLeast(n, RECON_T_FACTION);
       if (hackInFlight && hackTargetId == p->hdr.from_id) {
         hackInFlight        = false;
         hackVerdictReady    = true;
@@ -794,6 +858,7 @@ void loraHandlePacket(uint8_t* buf, int len) {
       if (n) {
         strncpy(n->msg_inbox, p->text, 32); n->msg_inbox[32] = '\0';
         n->msg_unread = true;
+        reconAtLeast(n, RECON_T_NAME);   // they signed the message by sending it
         pendingMsg = String(p->text); pendingMsgFrom = chipIdStr(p->hdr.from_id);
       }
       break;
@@ -1043,13 +1108,6 @@ void loraTick() {
 //  Helpers used by the sketch / portal
 // ─────────────────────────────────────────────
 String loraGetSignal() { return loraReady ? String(loraLastRSSI) + " dBm" : "offline"; }
-
-String statTypeName(uint8_t t) {
-  if (t == STAT_BRUTE)    return "Brute Force";
-  if (t == STAT_STEALTH)  return "Stealth";
-  if (t == STAT_FIREWALL) return "Firewall";
-  return "Unknown";
-}
 
 char factionChar() {
   if (myFaction == "BLACK") return 'B';

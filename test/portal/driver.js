@@ -3,13 +3,21 @@ const S1={configured:true,name:"GhostByte",faction:"BLACK",id:"a1b2c3d4",version
  level:7,xp:420,xpNext:1050,sp:2,brute:11,stealth:5,firewall:8,battery:78,
  lora:{status:"Online",ready:true,rssi:-71,duty:0.123},
  action:{state:"SUCCESS",label:"RECON",tries:1,pending:false},
+ probe:{id:"00000000",state:"idle"},
  nodes:[
   {id:"beef0001",name:"VoidCrypt",level:9,faction:"W",avgRssi:-58,bars:4,
    proximity:"VERY CLOSE",status:"ACTIVE",ageMs:4200,recon:2,hackWon:false,
+   intel:10,pwned:true,brute:6,stealth:4,firewall:9,reconMax:10,
    cooldownMs:0,unread:true,msg:"north gate <now>"},
   {id:"beef0002",name:"NullGate",level:3,faction:"R",avgRssi:-98,bars:2,
    proximity:"DISTANT",status:"FADING",ageMs:130000,recon:0,hackWon:true,
+   intel:6,pwned:false,brute:-1,stealth:-1,firewall:-1,reconMax:10,
    cooldownMs:511000000,unread:false,msg:""}]};
+// An unidentified contact: everything the device refuses to hand over yet.
+const ANON={id:"beef0003",name:"UNKNOWN-0003",level:0,faction:"?",avgRssi:-70,
+ bars:3,proximity:"NEARBY",status:"ACTIVE",ageMs:1000,recon:0,hackWon:false,
+ intel:0,pwned:false,brute:-1,stealth:-1,firewall:-1,reconMax:10,
+ cooldownMs:0,canRecon:true,canHack:true,unread:false,msg:""};
 function ck(c,w){ if(!c){console.log("  FAIL:",w);bad++} }
 
 S=S1; render();
@@ -111,110 +119,242 @@ ck(wipeArmed===true,"first tap arms the wipe");
 ck(el("wipebtn").textContent.indexOf("TAP AGAIN")>=0,"button asks for confirmation");
 
 // ── recon mini-game ──
-// The odds contribution must match the firmware: score/max * 15.
-seqOpen("beef0001","VoidCrypt",10);
-ck(el("seqgrid").children.length===9,"3x3 grid built");
-ck(el("seqmax").textContent==="10","target sequence length shown");
-ck(el("seqmodal").className==="modal","mini-game opens on RECON");
+//
+// Recon is a conversation with the device now: POST a=recon opens the link and
+// parks the target's file, GET /api/reveal?n=<round> draws down one tier as
+// each round lands, POST a=reconend closes the run out. These tests drive that
+// conversation through the real fetch path, so a change that stops asking for
+// a tier — or asks for the wrong one — fails here rather than on the bench.
 
-var tiles=el("seqgrid").children;
-ck(listeners(tiles[0],"pointerdown")===1,
-   "tiles answer pointerdown, not click — click waits for release plus the "+
-   "browser's double-tap timeout, which is most of the lag");
-ck(pollIv===null,"the 2 s state poll is paused while the game is open");
-
-// play it honestly: read the generated sequence and repeat it, through the
-// real bound handler rather than by calling seqTap() behind its back
-seqBegin();
-flushTimers(80);                       // let round 1 finish flashing
-ck(seqOrder.length===1,"round 1 is one tile");
-var reached=0;
-for(var round=0;round<10;round++){
-  if(!seqAccepting)flushTimers(80);
-  if(!seqAccepting)break;
-  var target=seqOrder.slice();
-  for(var k=0;k<target.length;k++){
-    var tile=tiles[target[k]], ev=press(tile,"pointerdown",1000+k*120);
-    if(k===0&&round===0){
-      ck(tile.className==="lit",
-         "the tile is lit in the same turn as the press, before any timer runs");
-      var at=seqAt;
-      press(tile,"click",1000);        // the synthetic click that trails a tap
-      ck(seqAt===at,"the trailing click does not count as a second press");
-      ck(ev.cancelable&&ev.preventDefault,"press events are preventable");
-    }
-  }
-  reached=target.length;
-  if(reached>=10)break;
-  flushTimers(80);
+const settle = () => new Promise(r => setImmediate(r));
+// Timers and promises interleave: a reveal is dispatched from a tap handler and
+// resolves on the microtask queue, while playback runs on the timer queue.
+async function pump(rounds) {
+  for (let i = 0; i < (rounds || 8); i++) { flushTimers(200); await settle(); }
 }
-ck(reached===10,"a perfect run reaches 10, got "+reached);
-ck(seqBest===10,"score recorded as 10");
-ck(el("seqmsg").textContent.indexOf("+15%")>=0,
-   "perfect run advertises the +15% bonus, got: "+el("seqmsg").textContent);
+
+let probeState = "ready";
+const REVEALS = {2:["name","CODENAME","VoidCrypt"], 4:["faction","FACTION","W"],
+                 6:["level","LEVEL","9"],   7:["brute","BRUTE","6"],
+                 8:["stealth","STEALTH","4"], 9:["firewall","FIREWALL","9"],
+                 10:["pwned","BACKDOOR","OPEN"]};
+__routes["/api/action"] = () => ({ok:true});
+__routes["/api/state"]  = () => ({...S1, probe:{id:"beef0001", state:probeState}});
+__routes["/api/reveal"] = (url) => {
+  const n = Number((url.match(/[?&]n=(\d+)/)||[])[1]);
+  const t = REVEALS[n];
+  return t ? {n, field:t[0], label:t[1], value:t[2]} : {n};
+};
+
+// Play honestly: read the generated sequence and repeat it, through the real
+// bound handler rather than by calling seqTap() behind its back.
+async function play(upTo) {
+  const tiles = el("seqgrid").children;
+  seqBegin();
+  await pump();
+  let reached = 0;
+  for (let round = 0; round < 12; round++) {
+    if (!seqAccepting) await pump();
+    if (!seqAccepting) break;
+    const target = seqOrder.slice();
+    for (let k = 0; k < target.length; k++)
+      press(tiles[target[k]], "pointerdown", 1000 + round*2000 + k*120);
+    reached = target.length;
+    await settle();                       // let the reveal fetch resolve
+    if (upTo && reached >= upTo) break;
+    if (reached >= 10) break;
+    await pump(2);
+  }
+  return reached;
+}
+
+(async function () {
+
+setPw("secret");
+
+// ── an unidentified contact ──
+S = {...S1, nodes:[ANON]}; render();
+const anonHtml = el("nodelist").innerHTML;
+ck(anonHtml.includes("UNKNOWN-0003"), "unscouted node has no codename");
+ck(!anonHtml.includes("LVL 0"), "unscouted node does not claim level 0");
+ck(anonHtml.includes("LVL ?"), "unscouted level is withheld, not faked");
+ck(anonHtml.includes("Clear 2 rounds"), "the card says what recon would buy");
+ck(anonHtml.includes("intel 0/10"), "intel tier shown on the card");
+ck(!anonHtml.includes("BRU "), "no stat line before tier 7");
+S = {...S1}; render();
+ck(el("nodelist").includes === undefined || el("nodelist").innerHTML.includes("PWNED"),
+   "a backdoored node is marked PWNED");
+ck(el("nodelist").innerHTML.includes("RE-ENTER"),
+   "a backdoored node offers RE-ENTER instead of RECON");
+ck(el("nodelist").innerHTML.includes("BRU 6"), "tier 7+ shows the stat line");
+
+// ── opening recon probes first, and waits ──
+__net.length = 0;
+probeState = "wait";
+seqOpen("beef0002", "NullGate", 10, {intel:6, level:3, faction:"R",
+                                     brute:-1, stealth:-1, firewall:-1});
+ck(el("seqmodal").className === "modal", "mini-game opens on RECON");
+ck(el("seqgrid").children.length === 9, "3x3 grid built");
+ck(pollIv === null, "the 2 s state poll is paused while the game is open");
+ck(el("seqbtn").disabled === true, "START is locked until the target answers");
+await settle();
+ck(netTo("/api/action").length === 1, "opening recon sends one probe");
+ck(String(netTo("/api/action")[0].opts.body).includes("a=recon"),
+   "the probe is the recon action");
+ck(el("intel").innerHTML.includes("CODENAME"), "the dossier panel is drawn");
+ck((el("intel").innerHTML.match(/class="ir"/g) || []).length === 7 ||
+   (el("intel").innerHTML.match(/ir_/g) || []).length === 14,
+   "seven tiers listed");
+await pump(3);
+ck(el("seqbtn").disabled === true, "still locked while the probe is unanswered");
+
+probeState = "ready";
+await pump(4);
+ck(el("seqbtn").disabled === false, "START unlocks once the dossier is staged");
+ck(el("seqmsg").textContent.indexOf("Link up") >= 0, "the link is announced");
+
+// ── tiers land as rounds land ──
+__net.length = 0;
+const reached = await play();
+ck(reached === 10, "a perfect run reaches 10, got " + reached);
+ck(seqBest === 10, "score recorded as 10");
+
+const asked = netTo("/api/reveal").map(r => Number((r.url.match(/[?&]n=(\d+)/)||[])[1]));
+ck(asked.length === 10, "one reveal per round cleared, got " + asked.length);
+ck(asked.join(",") === "1,2,3,4,5,6,7,8,9,10",
+   "reveals are asked for in order, got " + asked.join(","));
+ck(netTo("/api/reveal").every(r => r.url.indexOf("pw=secret") > 0),
+   "every reveal carries the password — it commits state, so it is a mutation");
+ck(el("iv_name").textContent === "VoidCrypt", "round 2 revealed the codename");
+ck(el("iv_faction").textContent === "BLACK" || el("iv_faction").textContent === "WHITE",
+   "round 4 revealed the faction, spelled out: " + el("iv_faction").textContent);
+ck(el("iv_level").textContent === "9", "round 6 revealed the level");
+ck(el("iv_brute").textContent === "6", "round 7 revealed brute");
+ck(el("iv_stealth").textContent === "4", "round 8 revealed stealth");
+ck(el("iv_firewall").textContent === "9", "round 9 revealed firewall");
+ck(el("iv_pwned").textContent === "OPEN", "round 10 opened the backdoor");
+ck(el("ir_name").className.indexOf("got") >= 0, "a revealed row is marked earned");
+await pump(14);                            // let the perfect run close itself out
+
+// ── a run that stops early reveals only what it earned ──
+__net.length = 0;
+probeState = "ready";
+seqOpen("beef0002", "NullGate", 10, {intel:0});
+await pump(4);
+const five = await play(5);
+ck(five === 5, "stopped at round 5, got " + five);
+ck(el("iv_name").textContent === "VoidCrypt", "the codename was earned at 2");
+ck(el("ir_level").className.indexOf("got") < 0,
+   "level stays locked at 5, row=" + el("ir_level").className);
+ck(el("ir_firewall").className.indexOf("got") < 0, "firewall stays locked at 5");
+seqFail(0);
+ck(el("seqmsg").textContent.indexOf("Round 6") >= 0,
+   "the end screen names what the next round would have bought: " + el("seqmsg").textContent);
+
+// ── closing the run reports it exactly once ──
+__net.length = 0;
+await pump(6);
+const ends = netTo("/api/action").filter(r => String(r.opts.body).includes("a=reconend"));
+ck(ends.length === 1, "the run is closed out once, got " + ends.length);
+ck(String(ends[0].opts.body).includes("score=5"), "the closing score is reported");
+seqQuit();
+await settle();
+ck(netTo("/api/action").filter(r => String(r.opts.body).includes("a=reconend")).length === 1,
+   "quitting after the run has already closed does not report it twice");
+ck(!!pollIv, "poll resumes when the game closes");
+
+// ── a target that never answers costs the player nothing ──
+__net.length = 0;
+probeState = "failed";
+seqOpen("beef0002", "NullGate", 10, {intel:0});
+await pump(4);
+ck(el("seqbtn").disabled === true, "START never unlocks against a silent target");
+ck(el("seqbtn").textContent === "NO LINK", "the dead link is named");
+ck(netTo("/api/reveal").length === 0, "nothing is revealed without a dossier");
+seqQuit(); await settle();
+probeState = "ready";
+
+// ── cancelling and re-opening must not leave two probe loops racing ──
+// The abandoned loop keeps its pending fetch. If it is still allowed to act
+// when the modal comes back, it drives a second copy of the same game.
+__net.length = 0;
+probeState = "wait";
+seqOpen("beef0001", "VoidCrypt", 10, {intel:10, pwned:true});
+await settle();                             // first probe loop is now in flight
+seqQuit();
+await settle();
+probeState = "ready";
+seqOpen("beef0001", "VoidCrypt", 10, {intel:10, pwned:true});
+await pump(14);
+const twice = netTo("/api/reveal").map(r => Number((r.url.match(/[?&]n=(\d+)/)||[])[1]));
+ck(twice.join(",") === "2,4,6,7,8,9,10",
+   "the abandoned probe loop does not run a second copy of the game, got " +
+   twice.join(","));
+await pump(14);
+
+// ── a backdoored node skips the game entirely ──
+__net.length = 0;
+seqOpen("beef0001", "VoidCrypt", 10, {intel:10, pwned:true});
+await pump(10);
+const back = netTo("/api/reveal").map(r => Number((r.url.match(/[?&]n=(\d+)/)||[])[1]));
+ck(back.join(",") === "2,4,6,7,8,9,10",
+   "re-entering pulls every tier and plays no game, got " + back.join(","));
+ck(el("iv_pwned").textContent === "OPEN", "the backdoor row is filled straight away");
+ck(seqBest === 10, "a backdoor run scores a full 10");
+await pump(12);
 
 // The bonus the portal advertises must match what the firmware awards.
 // Firmware: (score * RECON_MAX_BONUS) / RECON_MAX_SEQ, integer division.
 // test_link.cpp asserts the same table from the C++ side (60 / 67 / 75).
-[[0,0],[5,7],[10,15]].forEach(function(pair){
-  ck(Math.floor(pair[0]*15/10)===pair[1],
-     "bonus for sequence "+pair[0]+" is +"+pair[1]+"%");
+[[0,0],[5,7],[10,15]].forEach(function (pair) {
+  ck(Math.floor(pair[0]*15/10) === pair[1],
+     "bonus for sequence " + pair[0] + " is +" + pair[1] + "%");
 });
-
-// a wrong tile ends the run at the last completed round
-seqOpen("beef0002","NullGate",10);
-seqBegin(); flushTimers(80);
-var wrong=(seqOrder[0]+1)%9;
-seqTap(wrong);
-ck(seqBest===0,"failing round 1 scores 0");
-ck(el("seqmsg").textContent.indexOf("Wrong tile")>=0,"failure is explained");
-
-seqOpen("beef0003","IronCore",10);
-seqBegin(); flushTimers(80);
-seqTap(seqOrder[0]);                    // clear round 1
-flushTimers(80);
-if(seqAccepting){ seqTap((seqOrder[0]+1)%9); }   // fail round 2
-ck(seqBest===1,"failing round 2 keeps the score from round 1, got "+seqBest);
 
 // ── responsiveness ──
 // Two presses of the same tile in quick succession. The dedupe that swallows a
-// touch's compatibility mousedown must not swallow these, and the first
-// press's fade timer must not blank the second press's light.
-seqOpen("beef0004","Relay",10);
-seqOrder=[3,3,3];seqAt=0;seqAccepting=true;seqPlaying=true;
-var t3=el("seqgrid").children[3];
-press(t3,"pointerdown",5000);
-ck(seqAt===1,"first press registers");
-var alive1=__timers.filter(function(t){return t.alive}).length;
-press(t3,"pointerdown",5090);           // 90 ms later, same tile
-ck(seqAt===2,"a repeat press 90 ms later still counts, seqAt="+seqAt);
-ck(t3.className==="lit","the tile is lit after the second press");
-ck(__timers.filter(function(t){return t.alive}).length===alive1,
+// touch's compatibility mousedown must not swallow these, and the first press's
+// fade timer must not blank the second press's light.
+seqOpen("beef0004", "Relay", 10, {intel:0});
+await pump(4);
+seqOrder = [3,3,3]; seqAt = 0; seqAccepting = true; seqPlaying = true;
+const t3 = el("seqgrid").children[3];
+press(t3, "pointerdown", 5000);
+ck(seqAt === 1, "first press registers");
+ck(t3.className === "lit",
+   "the tile is lit in the same turn as the press, before any timer runs");
+const alive1 = __timers.filter(t => t.alive).length;
+press(t3, "pointerdown", 5090);           // 90 ms later, same tile
+ck(seqAt === 2, "a repeat press 90 ms later still counts, seqAt=" + seqAt);
+ck(t3.className === "lit", "the tile is lit after the second press");
+ck(__timers.filter(t => t.alive).length === alive1,
    "the first press's fade timer was cancelled, not left to blank the second");
+const at = seqAt;
+press(t3, "click", 5100);                 // the synthetic click that trails a tap
+ck(seqAt === at, "the trailing click does not count as a second press");
+seqQuit(); await settle();
 
 // Old WebViews without pointer events fall back to touchstart, and must not
 // also fire on the compatibility mousedown that trails it.
 delete globalThis.PointerEvent;
-seqOpen("beef0005","Relay2",10);
-var t5=el("seqgrid").children[0];
-ck(listeners(t5,"touchstart")===1&&listeners(t5,"mousedown")===1,
+seqOpen("beef0005", "Relay2", 10, {intel:0});
+await pump(4);
+const t5 = el("seqgrid").children[0];
+ck(listeners(t5, "touchstart") === 1 && listeners(t5, "mousedown") === 1,
    "fallback path binds touchstart and mousedown");
-seqOrder=[0,0];seqAt=0;seqAccepting=true;seqPlaying=true;seqBest=0;
-var te=press(t5,"touchstart",9000);
-ck(te.defaultPrevented,"touchstart is prevented so the page cannot scroll away");
-press(t5,"mousedown",9300);             // the compatibility event
-ck(seqAt===1&&seqBest===0,
-   "the compatibility mousedown is not a second press, seqAt="+seqAt);
-globalThis.PointerEvent=function PointerEvent(){};
-
-// The poll pauses for the game and comes back afterwards.
-seqOpen("beef0006","Relay3",10);
-ck(!pollIv,"poll stopped on open");
-seqQuit();
-ck(!!pollIv,"poll resumes when the game closes");
+seqOrder = [0,0]; seqAt = 0; seqAccepting = true; seqPlaying = true; seqBest = 0;
+const te = press(t5, "touchstart", 9000);
+ck(te.defaultPrevented, "touchstart is prevented so the page cannot scroll away");
+press(t5, "mousedown", 9300);             // the compatibility event
+ck(seqAt === 1 && seqBest === 0,
+   "the compatibility mousedown is not a second press, seqAt=" + seqAt);
+globalThis.PointerEvent = function PointerEvent() {};
+seqQuit(); await settle();
 pollStop();
 
-console.log("\nhelpers: fmtLeft(7d)="+fmtLeft(604800000)+
-            "  fmtLeft(11h22m)="+fmtLeft(40920000)+"  fmtAge(4.2s)="+fmtAge(4200));
-console.log(bad?`\n${bad} FAILURES`:"\nall portal render checks passed");
-process.exit(bad?1:0);
+console.log("\nhelpers: fmtLeft(7d)=" + fmtLeft(604800000) +
+            "  fmtLeft(11h22m)=" + fmtLeft(40920000) + "  fmtAge(4.2s)=" + fmtAge(4200));
+console.log(bad ? `\n${bad} FAILURES` : "\nall portal render checks passed");
+process.exit(bad ? 1 : 0);
+
+})();

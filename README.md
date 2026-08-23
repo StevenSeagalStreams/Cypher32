@@ -197,27 +197,49 @@ the climb lengthens steadily from there.
 This is what it's all for.
 
 **1. Find a target.**  
-Players appear in the **Radar** tab when their beacon reaches you, sorted by
+Contacts appear in the **Radar** tab when their beacon reaches you, sorted by
 signal strength with a plain-language range — VERY CLOSE, CLOSE, DISTANT,
-FADING. Level and faction are visible. Everything else is dark until you probe.
+FADING. That is *all* you get. No name, no faction, no level. An unscouted
+contact is a signal, not a person.
 
 **2. Run recon.**  
-Recon is a **sequence-memory game**. A grid of tiles flashes a pattern; repeat
-it. Each round adds one step. The furthest round you complete is your recon
-score for that target, and it is worth `score × 1.5%` on your hack odds — so a
-perfect run of **10 gives the full +15%**, putting a level starting hack at
-**75%**.
+Recon is a **sequence-memory game**, and it is how anybody becomes somebody. A
+grid of tiles flashes a pattern; repeat it. Each round adds one step. Every
+round you clear strips another layer off the target — and the layer lands the
+moment the round does, while you are still playing:
 
-One wrong tile ends the run, and your best score against that node is kept.
+| Round | What comes back |
+|-------|-----------------|
+| 2 | their **codename** |
+| 4 | their **faction** |
+| 6 | their **level** |
+| 7 | their **Brute Force** |
+| 8 | their **Stealth** |
+| 9 | their **Firewall** — the Radar stops saying "odds unknown" |
+| 10 | a **backdoor** |
 
-You get **three attempts per node**. Spend them and recon is closed until that
-node's cooldown ends — then it resets and you get three fresh attempts, with
-the score cleared so the bonus has to be earned again.
+The furthest round you complete is also your recon score, worth `score × 1.5%`
+on your hack odds — a perfect run gives the full **+15%**, putting a level
+starting hack at **75%**.
 
-Each attempt also sends a LoRa request and the target's device replies with a
-random stat — Brute, Stealth, or Firewall. They don't choose what you see.
-Three attempts reveal all three. Once you know their Firewall, the Radar shows
-your real odds instead of "unknown".
+One wrong tile ends the run. Everything you already pulled is yours to keep;
+the rest stays dark.
+
+**A perfect 10 leaves a backdoor open.** Their file stops expiring when the
+cooldown does, their level and faction keep updating off their beacons on their
+own, and walking back in costs you neither an attempt nor another game — one
+tap re-pulls the whole dossier. It survives a reboot. It is the only thing in
+the game that does.
+
+You get **three attempts per node**, and an attempt is only spent once you
+actually pull something: a target that never answers, or a run that dies in the
+first round, costs nothing. Spend all three and recon is closed until that
+node's cooldown ends — then it resets, three fresh attempts, and the file goes
+back to a signal with no name on it. Unless you left a backdoor.
+
+Two things identify someone for free, because they identified themselves:
+**sending you a message**, and **attacking you**. Neither hands out the odds
+bonus — that is only ever earned by playing.
 
 **3. Hack.**  
 One attempt. One roll — made by *their* device, not yours, so nobody can modify
@@ -230,7 +252,8 @@ them how it went.
 **5. Lose** — locked out of that node for **12 hours**. Move on.
 
 Either way the node closes for 12 hours. When that ends, recon resets too: three
-fresh attempts and a clean slate on the sequence bonus.
+fresh attempts and a clean slate on the sequence bonus — and everything you knew
+about them goes dark again, unless you took the backdoor.
 
 Both cooldowns survive a reboot and survive the target walking out of range, so
 neither can be reset by power-cycling or waiting for them to drop off your radar.
@@ -247,8 +270,9 @@ floor: 25%   ceiling: 90%
 Brute is contested: it is measured against their Firewall, so it swings hard
 both ways and is the stat for cracking hard targets. Stealth is uncontested and
 worth half as much per point, but no Firewall can cancel it — the reliable
-investment. Recon is the lever you pull per target, and it also reveals your
-real odds before you commit.
+investment. Recon is the lever you pull per target — and by round 9 it stops
+being a bonus and starts being information: their Firewall in hand means the
+Radar shows your real odds before you commit instead of "unknown".
 
 No guarantee. Never 100%. RED and GREEN carry their own backfire risks on top,
 so their effective win rate is lower than the number shown.
@@ -264,8 +288,8 @@ All traffic runs at **868 MHz — SF7 — BW 125 kHz — CR 4/5 — sync 0x12**.
 | Packet | Type | Purpose |
 |--------|------|---------|
 | `BEACON` | broadcast | Presence pulse — level and faction only |
-| `RECON_REQ` | unicast | Probe a target for one stat |
-| `RECON_REPLY` | unicast | Target returns one random stat |
+| `RECON_REQ` | unicast | Open a scouting link on a target |
+| `RECON_REPLY` | unicast | Target returns its full file — level, faction, Brute, Stealth, Firewall |
 | `HACK_REQ` | unicast | Attack initiated — carries attacker's Brute |
 | `HACK_REPLY` | unicast | Defender returns Firewall and faction |
 | `HACK_RESULT` | unicast | Outcome and XP delta sent to defender |

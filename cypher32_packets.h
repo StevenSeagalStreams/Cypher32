@@ -3,10 +3,10 @@
 
 // T4.7 — the single source of truth for the version. Shown in the portal
 // Config tab and in /api/diag.
-#define FIRMWARE_VERSION "v61"
+#define FIRMWARE_VERSION "v62"
 
 // ─────────────────────────────────────────────
-//  CYPHER32 LORA PACKET PROTOCOL  — v60
+//  CYPHER32 LORA PACKET PROTOCOL  — v62
 // ─────────────────────────────────────────────
 //
 //  Link layer on top of the raw driver:
@@ -30,8 +30,8 @@
 
 // ── Packet type bytes ────────────────────────
 #define PKT_BEACON      0x01  // broadcast: "I exist"
-#define PKT_RECON_REQ   0x02  // ask target for one random stat
-#define PKT_RECON_REPLY 0x03  // reply with one stat (type + value)
+#define PKT_RECON_REQ   0x02  // open a scouting link on a target
+#define PKT_RECON_REPLY 0x03  // target returns its whole file
 #define PKT_HACK_REQ    0x04  // initiate hack — sends attacker brute
 #define PKT_HACK_REPLY  0x05  // defender replies with firewall level
 #define PKT_HACK_RESULT 0x06  // attacker tells defender the outcome
@@ -54,10 +54,27 @@
 #define RECON_MAX_SEQ    10   // longest sequence the mini-game runs to
 #define RECON_MAX_BONUS  15   // odds bonus for a perfect run
 
-// ── Recon stat types ─────────────────────────
-#define STAT_BRUTE    0x01
-#define STAT_STEALTH  0x02
-#define STAT_FIREWALL 0x03
+// ── Intel tiers ──────────────────────────────
+//  Every round you clear strips another layer off the target, and the reveal
+//  lands the moment the round lands — you watch them come apart as you play.
+//  Before round 2 a contact is an anonymous signal on the radar: recon is how
+//  anyone gets a name at all.
+//
+//      2   codename          6   level          9   firewall
+//      4   faction           7   brute         10   BACKDOOR
+//                            8   stealth
+//
+//  A perfect run leaves a backdoor open: that node's intel never expires with
+//  the lock, its level and faction track its beacons by themselves, and
+//  re-opening recon on it costs neither an attempt nor a game — you already
+//  own them.
+#define RECON_T_NAME      2
+#define RECON_T_FACTION   4
+#define RECON_T_LEVEL     6
+#define RECON_T_BRUTE     7
+#define RECON_T_STEALTH   8
+#define RECON_T_FIREWALL  9
+#define RECON_T_PWNED    10
 
 // ── Hack outcome flags ───────────────────────
 #define HACK_WIN  0x01
@@ -113,10 +130,19 @@ struct PktReconReq {
   PktHeader hdr;        // type=PKT_RECON_REQ
 };
 
+// The whole dossier comes back in one reply and the requester gates it locally
+// against the score its player actually earned. It could instead be filtered
+// here, by the target — but then the reveal could not land round by round, and
+// watching the target come apart while you play is the point of the mechanic.
+// Nothing defensible is being protected: the score was always self-reported,
+// and the check that matters — who won a hack — is still made by the defender.
 struct PktReconReply {
   PktHeader hdr;        // type=PKT_RECON_REPLY
-  uint8_t   stat_type;  // STAT_BRUTE / STAT_STEALTH / STAT_FIREWALL
-  uint8_t   stat_value; // the actual value (0-35)
+  uint8_t   level;      // 1-32
+  uint8_t   faction;    // 'B','W','R','G'
+  uint8_t   brute;
+  uint8_t   stealth;
+  uint8_t   firewall;
 };
 
 struct PktHackReq {
@@ -178,11 +204,20 @@ struct KnownNode {
   uint8_t       rssi_idx;
   uint8_t       rssi_n;              // samples collected so far (0..RSSI_HIST)
 
-  // Recon — up to 3 attempts, one stat revealed per attempt
-  uint8_t       recon_count;         // how many recons done (0-3)
-  uint8_t       recon_types[3];      // STAT_BRUTE/STEALTH/FIREWALL
-  uint8_t       recon_values[3];     // revealed values
+  // Recon — 3 attempts per lock window; the best sequence is the intel tier.
+  // level and faction above are the live values from their beacons; recon_score
+  // decides whether we are allowed to look at them yet.
+  uint8_t       recon_count;         // attempts spent this window (0-3)
   uint8_t       recon_score;         // best sequence reached here (0-10)
+  // What we are allowed to look at. Normally the mini-game score, but talking
+  // to us or attacking us identifies you for free, and that must not also hand
+  // out the odds bonus — which is why this is a separate number from
+  // recon_score rather than the same one with favours added to it.
+  uint8_t       intel;
+  uint8_t       seen_brute;          // only meaningful at tier RECON_T_BRUTE+
+  uint8_t       seen_stealth;
+  uint8_t       seen_firewall;
+  bool          pwned;               // perfect run — intel persists and refreshes
 
   // Hack state — manual, one attempt only
   bool          hack_attempted;
@@ -197,6 +232,16 @@ struct KnownNode {
   bool          msg_unread;
   char          msg_sent[33];   // last message WE sent to this node
 };
+
+// Is this tier unlocked on this node?
+static inline bool reconKnows(const KnownNode* n, uint8_t tier) {
+  return n && n->intel >= tier;
+}
+// Raise the intel tier without touching recon_score, i.e. without paying out
+// the hack-odds bonus that only the mini-game earns.
+static inline void reconAtLeast(KnownNode* n, uint8_t tier) {
+  if (n && n->intel < tier) n->intel = tier;
+}
 
 #define MAX_KNOWN_NODES 20
 

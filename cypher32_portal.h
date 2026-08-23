@@ -96,6 +96,19 @@ textarea{min-height:64px;resize:none}
 .seq.locked div{cursor:default}
 .seqhead{display:flex;justify-content:space-between;align-items:baseline}
 .seqhead b{font-size:22px;color:#7dffa8}
+/* The dossier. Rows sit locked and dim with the round that buys them, then
+   snap to full contrast the instant that round lands. */
+.ir{display:flex;justify-content:space-between;align-items:baseline;gap:8px;
+ padding:4px 0;border-bottom:1px solid #16261d;font-size:13px}
+.ir:last-child{border-bottom:0}
+.ir .k{color:#4d7a5f;letter-spacing:1px;font-size:11px;text-transform:uppercase}
+.ir .v{color:#2f4a3a;font-variant-numeric:tabular-nums}
+.ir .n{color:#2f4a3a;font-size:10px;min-width:18px;text-align:right}
+.ir.got .k{color:#6fbf8a}
+.ir.got .v{color:#b6ffcf;font-weight:600}
+.ir.got .n{color:#4d7a5f}
+.ir.new .v{animation:pop .5s ease-out}
+@keyframes pop{0%{color:#fff;transform:translateX(-6px)}100%{color:#b6ffcf;transform:none}}
 </style></head><body>
 <div id="banner" class="banner"></div>
 
@@ -114,15 +127,19 @@ textarea{min-height:64px;resize:none}
   </div>
 </div>
 
-<!-- Recon mini-game: sequence memory. Watch, then repeat. -->
+<!-- Recon mini-game: sequence memory. Watch, then repeat. Every round you
+     clear strips another layer off the target, live, while you play. -->
 <div id="seqmodal" class="modal hide">
   <div class="card">
     <div class="seqhead"><div class="ct" style="margin:0">Recon &mdash; <span id="seqtarget">?</span></div>
       <b id="seqlen">0</b></div>
     <div class="xs mut" id="seqmsg">Watch the sequence, then repeat it.</div>
     <div class="seq" id="seqgrid"></div>
-    <div class="xs mut">Each round adds one step. Reach <b id="seqmax">10</b> for the
-    full <b>+15%</b> hack bonus. Your best run is kept, and you get three attempts per node before its cooldown has to run out.</div>
+    <div class="ct" style="margin:14px 0 6px">Intel recovered</div>
+    <div id="intel"></div>
+    <div class="xs mut" id="seqfoot">Each round you clear strips off another
+    layer. A perfect <b id="seqmax">10</b> leaves a backdoor open: their file
+    stops expiring and keeps itself up to date. Three attempts per node.</div>
     <button id="seqbtn" onclick="seqBegin()">START</button>
     <button class="btn ghost" onclick="seqQuit()">Cancel</button>
   </div>
@@ -473,7 +490,7 @@ function wipe(){
 // forgiving on the first rounds and unforgiving after: one wrong tile ends it,
 // which is what makes a long run worth something.
 var seqTarget="",seqOrder=[],seqAt=0,seqBest=0,seqPlaying=false,seqAccepting=false;
-var SEQ_MAX=10;
+var SEQ_MAX=10,seqNode={},seqClosed=false,seqRun=0;
 
 // A tile has to answer the finger, not the network and not the next repaint
 // after it. Three things were costing up to a second between press and light:
@@ -508,16 +525,60 @@ function seqBind(d,k){
   d.addEventListener("click",function(e){if(e&&e.preventDefault)e.preventDefault()});
 }
 
-function seqOpen(id,name,max){
-  seqTarget=id; SEQ_MAX=max||10;
+// ── the dossier ──
+// Which round buys which field. The device owns the same table; this copy only
+// decides what the panel looks like before anything has been earned.
+var TIERS=[[2,"name","CODENAME"],[4,"faction","FACTION"],[6,"level","LEVEL"],
+           [7,"brute","BRUTE"],[8,"stealth","STEALTH"],[9,"firewall","FIREWALL"],
+           [10,"pwned","BACKDOOR"]];
+var FACNAME={B:"BLACK",W:"WHITE",R:"RED",G:"GREEN"};
+
+function intelDraw(){
+  $("intel").innerHTML=TIERS.map(function(t){
+    return '<div class="ir" id="ir_'+t[1]+'"><span class="k">'+t[2]+'</span>'+
+           '<span class="v" id="iv_'+t[1]+'">&mdash;</span>'+
+           '<span class="n">'+t[0]+'</span></div>'}).join("");
+}
+// One field, the moment the round that paid for it lands.
+function intelSet(field,value){
+  var row=$("ir_"+field),val=$("iv_"+field);
+  if(!row||!val)return;
+  val.textContent=field==="faction"?(FACNAME[value]||value):value;
+  row.className="ir got new";
+  setTimeout(function(){if(row.className.indexOf("got")>=0)row.className="ir got"},600);
+}
+// Pre-fill whatever we already knew about this target from an earlier run, so
+// the panel opens showing the ground already taken rather than seven blanks.
+function intelSeed(n){
+  intelDraw();
+  var have=n.intel||0;
+  if(have>=2&&n.name&&n.name.indexOf("UNKNOWN")!==0) intelSet("name",n.name);
+  if(have>=4&&n.faction&&n.faction!=="?")            intelSet("faction",n.faction);
+  if(have>=6&&n.level)                               intelSet("level",n.level);
+  if(n.brute>=0)                                     intelSet("brute",n.brute);
+  if(n.stealth>=0)                                   intelSet("stealth",n.stealth);
+  if(n.firewall>=0)                                  intelSet("firewall",n.firewall);
+  if(n.pwned)                                        intelSet("pwned","OPEN");
+}
+
+// The radar owns the node objects; the button only carries an index. Passing
+// the whole record through an onclick attribute meant escaping a name that is
+// now sometimes "UNKNOWN-3f2a" and sometimes a codename, for no benefit.
+var radarNodes=[];
+function seqFromRadar(i){
+  var n=radarNodes[i]; if(!n)return;
+  seqOpen(n.id,n.name,n.reconMax||10,n);
+}
+
+function seqOpen(id,name,max,node){
+  seqTarget=id; SEQ_MAX=max||10; seqNode=node||{}; seqClosed=false; seqRun++;
   seqOrder=[];seqAt=0;seqBest=0;seqPlaying=false;seqAccepting=false;
   pollStop();                       // nothing else may touch the DOM mid-game
   $("seqtarget").textContent=name;
   $("seqmax").textContent=String(SEQ_MAX);
   $("seqlen").textContent="0";
-  $("seqmsg").textContent="Watch the sequence, then repeat it.";
-  $("seqbtn").textContent="START";$("seqbtn").disabled=false;
-  var g=$("seqgrid");g.className="seq";g.innerHTML="";
+  $("seqbtn").textContent="START";$("seqbtn").disabled=true;
+  var g=$("seqgrid");g.className="seq locked";g.innerHTML="";
   seqTimers={};
   for(var i=0;i<9;i++){
     var d=document.createElement("div");
@@ -525,10 +586,73 @@ function seqOpen(id,name,max){
     seqBind(d,i);
     g.appendChild(d);
   }
+  intelSeed(seqNode);
   $("seqmodal").className="modal";
+  // Open the link first. The target's file has to be in hand before the game
+  // starts, or the reveals could not land round by round — and if nobody
+  // answers, better to say so than to charge the player thirty seconds of
+  // memory game for nothing.
+  $("seqmsg").textContent="Establishing link…";
+  post("/api/action",{a:"recon",id:id,pw:pw()}).then(function(r){
+    if(r&&r.err){seqLinkFailed(r.err);return}
+    seqAwaitProbe(0,seqRun);
+  }).catch(function(e){
+    if(e.code===401){seqQuit();needPw("Enter the device password to continue.");return}
+    seqLinkFailed(e.message||"Link failed")});
 }
-function seqQuit(){seqPlaying=false;seqAccepting=false;
-  $("seqmodal").className="modal hide";pollStart()}
+function seqLinkFailed(why){
+  $("seqmsg").textContent=why;
+  $("seqbtn").textContent="NO LINK";$("seqbtn").disabled=true;
+}
+// Poll only until the dossier is staged. This runs before the first tap, so
+// the cost of a render here is invisible; once the game starts, nothing polls.
+// Stamped with the run it belongs to. Cancelling and immediately re-opening
+// used to leave the first loop alive underneath the second, and two of these
+// racing on one dossier reveal every tier twice.
+function seqAwaitProbe(tries,run){
+  if(run!==seqRun)return;                                    // superseded
+  if($("seqmodal").className.indexOf("hide")>=0)return;      // cancelled
+  if(tries>40){seqLinkFailed("No response — out of range?");return}
+  fetch("/api/state",{cache:"no-store"}).then(function(r){return r.json()})
+    .then(function(j){
+      S=j;
+      var p=j.probe||{};
+      if(p.state==="ready"){
+        $("seqmsg").textContent=seqNode.pwned
+          ? "Backdoor still open. Pulling their file…"
+          : "Link up. Watch the sequence, then repeat it.";
+        $("seqbtn").disabled=false;
+        // You already own this one. No game, no attempt spent — walk in.
+        if(seqNode.pwned) seqBackdoor();
+        return;
+      }
+      if(p.state==="failed"){seqLinkFailed("No response — out of range?");return}
+      setTimeout(function(){seqAwaitProbe(tries+1,run)},250);
+    }).catch(function(){setTimeout(function(){seqAwaitProbe(tries+1,run)},400)})
+}
+// The perfect-run payoff: every tier, straight away, for free.
+function seqBackdoor(){
+  seqPlaying=true;$("seqbtn").disabled=true;$("seqbtn").textContent="RE-ENTERING…";
+  var i=0;
+  (function next(){
+    if(i>=TIERS.length){seqBest=SEQ_MAX;seqDone("Backdoor still open.");return}
+    seqReveal(TIERS[i++][0]);
+    setTimeout(next,220);
+  })();
+}
+// Every exit goes through here exactly once, so the run is always closed out
+// on the device — and only ever closed out once.
+function seqClose(){
+  seqPlaying=false;seqAccepting=false;
+  $("seqmodal").className="modal hide";
+  pollStart();
+  if(seqClosed||!seqTarget)return;
+  seqClosed=true;
+  var id=seqTarget,score=seqBest;seqTarget="";
+  post("/api/action",{a:"reconend",id:id,score:score,pw:pw()})
+    .then(refresh).catch(function(){refresh()});
+}
+function seqQuit(){seqClose()}
 
 function seqTiles(){return $("seqgrid").children}
 var seqTimers={};
@@ -577,10 +701,24 @@ function seqTap(i){
   if(seqAt>=seqOrder.length){
     seqAccepting=false;
     seqBest=seqOrder.length;
+    // Fired on the tap that finishes the round, not after the pause. The
+    // request is in the air while the "next round" beat plays out, so the row
+    // fills in as the player is still looking at the tile they just hit.
+    seqReveal(seqBest);
     if(seqBest>=SEQ_MAX){ seqDone("Perfect run."); return; }
     $("seqmsg").textContent="Correct — next round.";
     setTimeout(seqNextRound,450);
   }
+}
+
+// Ask the device for the one tier this round bought. Tiers that unlock nothing
+// come back as a bare number and simply do not paint — the table lives on the
+// device, and this stays dumb about it on purpose.
+function seqReveal(n){
+  return fetch("/api/reveal?n="+n+"&pw="+encodeURIComponent(pw()),{cache:"no-store"})
+    .then(function(r){return r.json()})
+    .then(function(d){if(d&&d.field)intelSet(d.field,d.value)})
+    .catch(function(){})
 }
 function seqFail(i){
   seqAccepting=false;seqPlaying=false;
@@ -591,14 +729,17 @@ function seqDone(why){
   seqPlaying=false;seqAccepting=false;
   $("seqgrid").className="seq locked";
   var bonus=Math.floor(seqBest*15/SEQ_MAX);
-  $("seqmsg").textContent=why+" Sequence "+seqBest+" — +"+bonus+"% hack odds.";
-  $("seqbtn").textContent="SENDING RECON…";$("seqbtn").disabled=true;
-  var id=seqTarget;
-  setTimeout(function(){
-    $("seqmodal").className="modal hide";
-    pollStart();
-    act("recon",{id:id,score:seqBest});
-  },1400);
+  var next=TIERS.filter(function(t){return t[0]>seqBest})[0];
+  $("seqmsg").textContent=why+" Sequence "+seqBest+" — +"+bonus+"% hack odds."+
+    (next?"  Round "+next[0]+" was their "+next[2].toLowerCase()+".":"");
+  $("seqbtn").textContent=seqBest>=SEQ_MAX?"BACKDOOR OPEN":"CLOSING…";
+  $("seqbtn").disabled=true;
+  // Long enough to read the last row that landed. Everything is already
+  // committed on the device — this pause is for the player, not the data.
+  // Stamped with the run it belongs to: a stale timer must never reach in and
+  // close a game the player has since started against someone else.
+  var run=seqRun;
+  setTimeout(function(){if(run===seqRun)seqClose()},seqBest>=SEQ_MAX?2600:1800);
 }
 
 // ── rendering ──
@@ -636,25 +777,39 @@ function render(){
   var ns=S.nodes.slice().sort(function(a,b){return b.avgRssi-a.avgRssi});
   $("rcount").textContent=ns.length+" in range";
   $("nonodes").className="card"+(ns.length?" hide":"");
-  $("nodelist").innerHTML=ns.map(function(n){
+  $("nodelist").innerHTML=ns.map(function(n,ni){
     var pips="";for(var i=0;i<3;i++)pips+=(i<n.recon?"●":"○");
     var cd=n.cooldownMs>0;
     var lock=n.hackWon?"OWNED · "+fmtLeft(n.cooldownMs):
              (cd?"LOCKED OUT · "+fmtLeft(n.cooldownMs):"");
+    // An unscouted contact is a signal, not a person: no name, no faction, no
+    // level. Recon is the only thing that turns one into the other.
+    var known=(n.intel||0),anon=known<2;
+    var stat=function(v){return v>=0?v:"?"};
     return '<div class="node'+(n.status==="FADING"?" fade":"")+'">'+
       '<div class="row"><div><b>'+esc(n.name)+'</b> '+
+        (n.pwned?'<span class="pill fB" title="backdoor open">PWNED</span> ':'')+
         '<span class="pill f'+esc(n.faction)+'">'+esc(n.faction)+'</span></div>'+
-        '<div class="xs mut">LVL '+n.level+'</div></div>'+
+        '<div class="xs mut">'+(n.level?"LVL "+n.level:"LVL ?")+'</div></div>'+
       '<div class="row xs mut" style="margin-top:6px">'+
         '<span>'+bars(n.bars)+' '+esc(n.proximity)+'</span>'+
         '<span>'+fmtAge(n.ageMs)+'</span></div>'+
+      (known>=7?'<div class="row xs mut" style="margin-top:6px">'+
+        '<span>BRU '+stat(n.brute)+'</span><span>STE '+stat(n.stealth)+'</span>'+
+        '<span>FW '+stat(n.firewall)+'</span></div>':'')+
       '<div class="row" style="margin-top:8px">'+
         '<span class="xs mut">Recon <span class="pips">'+pips+'</span>'+
-          ' &middot; seq '+(n.reconScore||0)+'/'+(n.reconMax||10)+
+          ' &middot; intel '+known+'/'+(n.reconMax||10)+
           (n.odds>=0?' &middot; odds '+n.odds+'%':' &middot; odds unknown')+'</span>'+
         (lock?'<span class="xs mut">'+lock+'</span>':'')+'</div>'+
+      (anon?'<div class="xs mut" style="margin-top:6px">'+
+        'Unidentified. Clear 2 rounds of recon for a codename, 4 for their '+
+        'faction, 6 for their level, 7&ndash;9 for their stats.</div>':'')+
+      (n.pwned?'<div class="xs mut" style="margin-top:6px">'+
+        'Backdoor open &mdash; their file never expires, and recon costs you '+
+        'neither an attempt nor a game.</div>':'')+
       (n.training?'<div class="xs mut" style="margin-top:6px">'+
-        'Practice target. Scout it, watch your odds appear, then hack it. '+
+        'Practice target. Scout it, watch their file come apart, then hack it. '+
         'It disappears once you reach LVL 2.</div>':'')+
       (n.canHack===false?'<div class="xs mut" style="margin-top:6px">'+
         'Immune &mdash; WHITE can only attack BLACK and RED.</div>':'')+
@@ -663,10 +818,11 @@ function render(){
            :'Recon spent. Hack it, or wait out the cooldown for 3 more.')+'</div>':'')+
       '<div class="row" style="margin-top:10px;gap:8px">'+
         '<button class="btn inline ghost" '+(n.canRecon===false?"disabled":"")+
-          ' onclick="seqOpen(\''+n.id+'\',\''+esc(n.name)+'\','+(n.reconMax||10)+')">RECON</button>'+
+          ' onclick="seqFromRadar('+ni+')">'+(n.pwned?"RE-ENTER":"RECON")+'</button>'+
         '<button class="btn inline" '+((cd||n.canHack===false)?"disabled":"")+
           ' onclick="act(\'hack\',{id:\''+n.id+'\'})">HACK</button>'+
       '</div></div>'}).join("");
+  radarNodes=ns;
 
   // message targets + inbox
   var opts=ns.map(function(n){return'<option value="'+n.id+'">'+esc(n.name)+'</option>'}).join("");

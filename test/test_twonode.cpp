@@ -205,23 +205,39 @@ int main() {
     NodeCtx A, B; initCtx(A, ID_A, "BLACK", 12, 5); initCtx(B, ID_B, "WHITE", 6, 9);
     air.clear(); lossPercent = 0; g_millis = 1000;
 
-    load(A); loraSendRecon(ID_B); save(A);
+    load(A);
+    loraReconProbeStart(ID_B);
+    loraSendRecon(ID_B);
+    save(A);
     bool ok = runUntil(A, B, 5000, []{
-      KnownNode* n = findNode(ID_B);
-      return n && n->recon_count > 0;
+      return reconProbe.state == RECON_PROBE_READY;
     });
     CHECK(ok, "A receives a recon reply from B");
     load(A);
+    // The whole dossier comes back in one reply and is staged, not stored: the
+    // mini-game draws it down a tier per round, so nothing is written into the
+    // node record until a round has been paid for.
+    CHECK(reconProbe.target   == ID_B, "the dossier is filed against B");
+    CHECK(reconProbe.brute    == 6,    "brute matches B's real value");
+    CHECK(reconProbe.stealth  == 4,    "stealth matches B's real value");
+    CHECK(reconProbe.firewall == 9,    "firewall matches B's real value");
+    CHECK(reconProbe.faction  == 'W',  "faction matches B");
     KnownNode* n = findNode(ID_B);
-    CHECK(n && n->recon_count == 1, "exactly one stat revealed");
-    if (n && n->recon_count) {
-      uint8_t t = n->recon_types[0], v = n->recon_values[0];
-      bool valid = (t == STAT_BRUTE && v == 6) || (t == STAT_STEALTH && v == 4) ||
-                   (t == STAT_FIREWALL && v == 9);
-      CHECK(valid, "revealed stat matches B's real value");
-    }
+    CHECK(n && n->intel == 0,       "no intel is granted by the probe alone");
+    CHECK(n && n->seen_firewall == 0, "no stat is stored before a round buys it");
     CHECK(loraActionState == LA_SUCCESS, "A's action reports SUCCESS");
     CHECK(loraTimeouts == 0,             "no spurious timeout");
+
+    // The probe has to fail on its own clock, or the portal waits forever on a
+    // target that walked out of range.
+    reconProbe.state = RECON_PROBE_WAIT;
+    reconProbe.deadline = g_millis + RECON_PROBE_MS;
+    loraServiceReconProbe();
+    CHECK(reconProbe.state == RECON_PROBE_WAIT, "a fresh probe is still waiting");
+    g_millis += RECON_PROBE_MS + 1;
+    loraServiceReconProbe();
+    CHECK(reconProbe.state == RECON_PROBE_FAILED, "a silent target times the probe out");
+    reconProbe.state = RECON_PROBE_IDLE;
     save(A);
   }
 
@@ -289,10 +305,10 @@ int main() {
       air.clear(); lossPercent = loss; g_millis = 1000;
       lossRng = 4242 + trial * 7919; g_rngState = 999 + trial * 31;
 
-      load(A); loraSendRecon(ID_B); save(A);
+      load(A); reconProbe.state = RECON_PROBE_IDLE;
+      loraReconProbeStart(ID_B); loraSendRecon(ID_B); save(A);
       bool ok = runUntil(A, B, 6000, []{
-        KnownNode* n = findNode(ID_B);
-        return n && n->recon_count > 0;
+        return reconProbe.state == RECON_PROBE_READY;
       });
       if (ok) wins++;
     }
