@@ -133,10 +133,20 @@ Your command interface. Connect to the device's Wi-Fi and open **192.168.4.1**.
 | **Radar** | Everyone in range, sorted by signal — recon and hack from here |
 | **Skills** | Spend skill points from level-ups |
 | **Msgs** | Send and receive LoRa text — 32 chars max |
-| **Config** | Password, identity, node list, factory reset, diagnostics |
+| **Log** | The last 20 things that happened, newest first |
+| **Config** | Contact alert, password, identity, node list, factory reset, diagnostics |
 
 The page never reloads. It polls the device twice a second, so signal strength,
 cooldown countdowns and action status update live.
+
+**Contact alert.** When a node you have never seen before comes into range, the
+phone plays three notes — A, C, G, two detuned squares each, through a
+resonant filter and a short feedback delay. Synthesised on the page, so there
+is no audio file anywhere. The device shows a discovery on its screen for a few
+seconds and then goes back to idle, which is no use with the device in a bag;
+this is. It needs the page open and the phone awake, and some captive-portal
+mini-browsers refuse to play audio at all — open `192.168.4.1` in Chrome or
+Safari if you hear nothing. Off switch and a test button are in **Config**.
 
 **Every action tells you what happened.** Press HACK and you get
 `SENDING… → WAITING FOR REPLY (2/4) → SUCCESS`, or `NO RESPONSE — out of range?`

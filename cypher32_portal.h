@@ -313,6 +313,17 @@ textarea{min-height:64px;resize:none}
         <button class="btn ghost" onclick="changePw()">UPDATE PASSWORD</button>
       </div>
       <div class="card">
+        <div class="ct">Contact alert</div>
+        <p class="xs mut">Three notes from this phone when a node you have never
+        seen before comes into range. The screen on the device only says so for
+        a few seconds; this does not need you to be looking at it.</p>
+        <button class="btn ghost" id="sfxbtn" onclick="sfxToggle()">ALERT: ON</button>
+        <button class="btn ghost" onclick="sfxTest()">HEAR IT</button>
+        <p class="xs mut">Needs this page open and the phone awake. Some
+        captive-portal browsers refuse to play audio at all &mdash; if you hear
+        nothing, open <b>192.168.4.1</b> in Chrome or Safari instead.</p>
+      </div>
+      <div class="card">
         <div class="ct">Maintenance</div>
         <button class="btn ghost" onclick="act('clearnodes')">CLEAR NODE LIST</button>
         <button class="btn ghost" onclick="showDiag()">DIAGNOSTICS</button>
@@ -742,6 +753,100 @@ function seqDone(why){
   setTimeout(function(){if(run===seqRun)seqClose()},seqBest>=SEQ_MAX?2600:1800);
 }
 
+// ── contact alert ──
+//
+// A new node shows on the e-ink for a few seconds and then it is gone, which
+// is no use at all if the device is in a bag. The phone is the thing you are
+// actually holding, so the phone is what makes the noise.
+//
+// Synthesised, not sampled: a wav would cost more PROGMEM than the whole
+// mini-game, and the strict CSP on this page means nothing can be fetched.
+// Two detuned squares per note through a resonant lowpass that opens as the
+// note hits, all of it into a short feedback delay — which is most of what
+// made a 1987 computer sound like a computer.
+var actx=null,sfxBusNode=null,sfxOn=lsGet("sfx")!=="0";
+var sfxLast="",sfxCount=0;               // what last played, for the tests
+
+function sfxCtx(){
+  if(actx)return actx;
+  try{
+    var C=(typeof AudioContext!=="undefined")?AudioContext:
+          (typeof webkitAudioContext!=="undefined")?webkitAudioContext:null;
+    if(C)actx=new C();
+  }catch(e){actx=null}
+  return actx;
+}
+// Browsers will not let a page make noise until the user has touched it. The
+// context is created and resumed on the first press anywhere, so by the time a
+// node appears it is already awake.
+function sfxUnlock(){
+  var a=sfxCtx();
+  if(a&&a.state==="suspended"&&a.resume)a.resume();
+}
+function sfxBus(){
+  var a=sfxCtx(); if(!a)return null;
+  if(sfxBusNode)return sfxBusNode;
+  sfxBusNode=a.createGain(); sfxBusNode.gain.value=0.45;
+  var d=a.createDelay(0.5); d.delayTime.value=0.115;
+  var fb=a.createGain(); fb.gain.value=0.3;      // <1, or it never decays
+  var wet=a.createGain(); wet.gain.value=0.4;
+  sfxBusNode.connect(a.destination);
+  sfxBusNode.connect(d); d.connect(fb); fb.connect(d); d.connect(wet);
+  wet.connect(a.destination);
+  return sfxBusNode;
+}
+function sfxNote(t,freq,dur,gain){
+  var a=sfxCtx(),bus=sfxBus(); if(!a||!bus)return;
+  var g=a.createGain();
+  g.gain.setValueAtTime(0.0001,t);
+  g.gain.linearRampToValueAtTime(gain,t+0.006);        // no ramp worth hearing
+  g.gain.exponentialRampToValueAtTime(0.0001,t+dur);
+  var f=a.createBiquadFilter();
+  f.type="lowpass"; f.Q.value=7;
+  f.frequency.setValueAtTime(freq*2,t);
+  f.frequency.exponentialRampToValueAtTime(freq*7,t+dur*0.5);
+  [7,-7].forEach(function(cents){                      // detuned pair = width
+    var o=a.createOscillator();
+    o.type="square"; o.frequency.value=freq; o.detune.value=cents;
+    o.connect(f); o.start(t); o.stop(t+dur+0.03);
+  });
+  f.connect(g); g.connect(bus);
+}
+// A4 - C5 - G5. Root, minor third, minor seventh: rising, unresolved, and
+// distinctly not a doorbell.
+var CUE_DISCOVER=[[0,440.00,0.16,0.20],
+                  [0.095,523.25,0.16,0.20],
+                  [0.205,783.99,0.42,0.24]];
+function sfx(name){
+  sfxLast=name; sfxCount++;
+  if(!sfxOn)return;
+  var a=sfxCtx(); if(!a)return;
+  if(a.state==="suspended"){ if(a.resume)a.resume(); return }  // not yet allowed
+  var t0=a.currentTime+0.02;
+  CUE_DISCOVER.forEach(function(n){sfxNote(t0+n[0],n[1],n[2],n[3])});
+}
+function sfxToggle(){
+  sfxOn=!sfxOn; lsSet("sfx",sfxOn?"1":"0"); sfxPaint();
+  if(sfxOn)sfx("discover");
+}
+function sfxTest(){sfxUnlock();sfx("discover")}
+function sfxPaint(){
+  var b=$("sfxbtn"); if(b)b.textContent="ALERT: "+(sfxOn?"ON":"OFF");
+}
+
+// Which nodes are new since the last poll. Seeded silently on the first render
+// so that opening the portal in a room full of people is not an alarm — they
+// were already there, and only an arrival is news.
+var sfxSeen=null;
+function newContacts(nodes){
+  var ids={},fresh=[];
+  (nodes||[]).forEach(function(n){if(!n.training)ids[n.id]=1});
+  if(sfxSeen!==null)
+    for(var k in ids) if(!sfxSeen[k]) fresh.push(k);
+  sfxSeen=ids;
+  return fresh;
+}
+
 // ── rendering ──
 function fmtAge(ms){var s=Math.floor(ms/1000);
   if(s<60)return s+"s ago";if(s<3600)return Math.floor(s/60)+"m ago";
@@ -772,6 +877,10 @@ function render(){
   $("ksp").textContent=S.sp;$("kbr").textContent=S.brute;
   $("kst").textContent=S.stealth;$("kfw").textContent=S.firewall;
   Array.prototype.forEach.call(document.querySelectorAll(".sk"),function(b){b.disabled=S.sp<1});
+
+  // Anyone who was not here last poll. Done before the list is drawn so the
+  // sound and the card land together.
+  if(newContacts(S.nodes).length)sfx("discover");
 
   // radar, strongest first
   var ns=S.nodes.slice().sort(function(a,b){return b.avgRssi-a.avgRssi});
@@ -886,6 +995,11 @@ function doPing(){var id=$("pingto").value;if(!id)return;
 
 $("mtxt").addEventListener("input",function(){
   $("mcount").textContent=this.value.length+" / 32"});
+
+// One press anywhere is enough to earn the right to make noise later.
+if(typeof document!=="undefined"&&document.addEventListener)
+  document.addEventListener("pointerdown",sfxUnlock,{once:true});
+sfxPaint();
 
 refresh();pollStart();
 </script></body></html>)PORTAL";

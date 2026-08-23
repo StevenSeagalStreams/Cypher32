@@ -352,6 +352,56 @@ globalThis.PointerEvent = function PointerEvent() {};
 seqQuit(); await settle();
 pollStop();
 
+// ── contact alert ──
+// A new node is on the e-ink for a few seconds and then gone. The phone is the
+// thing you are holding, so the phone is what has to tell you.
+sfxSeen = null; sfxOn = true; __audio.state = "running"; __audio.started = 0;
+
+ck(newContacts([{id:"a"},{id:"b"}]).length === 0,
+   "the first look seeds silently — nobody in the room just arrived");
+ck(newContacts([{id:"a"},{id:"b"}]).length === 0, "a quiet poll says nothing");
+ck(newContacts([{id:"a"},{id:"b"},{id:"c"}]).join() === "c",
+   "an arrival is reported");
+ck(newContacts([{id:"c"}]).length === 0, "departures are not arrivals");
+ck(newContacts([{id:"c"},{id:"00000001",training:true}]).length === 0,
+   "the training dummy never announces itself");
+ck(newContacts([{id:"c"},{id:"a"}]).join() === "a",
+   "a node that dropped out and came back counts as a new contact");
+
+// end to end, through render()
+sfxSeen = null; __audio.started = 0; sfxCount = 0;
+S = {...S1, nodes:[S1.nodes[0]]}; render();
+ck(sfxCount === 0, "opening the portal on an existing node is silent");
+S = {...S1}; render();
+ck(sfxCount === 1, "a node appearing in a poll fires the alert");
+ck(__audio.started === 6, "three notes, two detuned oscillators each, got " +
+   __audio.started);
+
+// muted
+sfxOn = false; __audio.started = 0;
+S = {...S1, nodes:[...S1.nodes, ANON]}; render();
+ck(sfxCount === 2, "the alert is still raised when muted");
+ck(__audio.started === 0, "but nothing is played");
+sfxOn = true;
+
+// A browser that has not been touched yet refuses to make noise. Asking for
+// the cue must wake the context, not play into a suspended one and be lost.
+__audio.state = "suspended"; __audio.started = 0; __audio.resumed = 0;
+sfx("discover");
+ck(__audio.started === 0, "nothing plays while the context is suspended");
+ck(__audio.resumed === 1, "and the cue asks for it to be resumed");
+__audio.state = "running";
+
+// the switch, and that it survives a reload
+sfxToggle();
+ck(sfxOn === false && lsGet("sfx") === "0", "the alert can be switched off");
+ck(el("sfxbtn").textContent === "ALERT: OFF", "the button says which way it is");
+sfxToggle();
+ck(sfxOn === true && lsGet("sfx") === "1", "and switched back on");
+__audio.started = 0;
+sfxTest();
+ck(__audio.started === 6, "HEAR IT plays the cue on demand");
+
 console.log("\nhelpers: fmtLeft(7d)=" + fmtLeft(604800000) +
             "  fmtLeft(11h22m)=" + fmtLeft(40920000) + "  fmtAge(4.2s)=" + fmtAge(4200));
 console.log(bad ? `\n${bad} FAILURES` : "\nall portal render checks passed");

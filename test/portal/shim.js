@@ -35,7 +35,25 @@ globalThis.press=(el,type,ts)=>{
 };
 globalThis.listeners=(el,type)=>(((el||{}).__l||{})[type]||[]).length;
 globalThis.PointerEvent=function PointerEvent(){};   // modern path by default
-globalThis.document={getElementById:_el,createElement:_mk,
+// Web Audio, modelled just far enough to run the real synth. Counting the
+// oscillators that actually start is the difference between "a cue was
+// requested" and "the phone made a noise", and the mute switch turns on
+// exactly that distinction.
+function _param(){return {value:0,setValueAtTime(){},linearRampToValueAtTime(){},
+  exponentialRampToValueAtTime(){}}}
+function _anode(kind){return {kind,type:"",connect(x){this.to=x;return x},
+  disconnect(){},gain:_param(),frequency:_param(),detune:_param(),Q:_param(),
+  delayTime:_param(),start(){globalThis.__audio.started++},stop(){}}}
+globalThis.__audio={started:0,state:"running",resumed:0};
+globalThis.AudioContext=function(){
+  return {get state(){return globalThis.__audio.state}, currentTime:0,
+    resume(){globalThis.__audio.resumed++; globalThis.__audio.state="running"},
+    destination:_anode("dest"),
+    createGain:()=>_anode("gain"),           createDelay:()=>_anode("delay"),
+    createBiquadFilter:()=>_anode("filter"), createOscillator:()=>_anode("osc")};
+};
+
+globalThis.document={getElementById:_el,createElement:_mk,addEventListener(){},
   querySelectorAll:s=>s===".fc"?[]:s===".tab"?[{dataset:{t:"hud"},className:""}]:
                      s===".sk"?[{disabled:false},{disabled:false},{disabled:false}]:[]};
 globalThis.localStorage={_d:{},getItem(k){return this._d[k]||null},
