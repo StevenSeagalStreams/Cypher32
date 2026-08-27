@@ -6,3 +6,5 @@ test/portal/.run.js
 *.o
 test/test_qr
 test/test_qr_mask
+test/render_eink
+test/out/

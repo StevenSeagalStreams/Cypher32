@@ -220,8 +220,10 @@ inline bool qrEncode(const char* text, QrCode* q) {
   // ── bit stream ──
   uint8_t buf[80]; memset(buf, 0, sizeof(buf));
   int bit = 0;
-  #define QR_PUT(val, n) for (int _i = (n) - 1; _i >= 0; _i--) { \
-      if (((val) >> _i) & 1) buf[bit >> 3] |= (uint8_t)(0x80 >> (bit & 7)); bit++; }
+  #define QR_PUT(val, n) for (int _i = (n) - 1; _i >= 0; _i--) {            \
+      if (((val) >> _i) & 1) buf[bit >> 3] |= (uint8_t)(0x80 >> (bit & 7));  \
+      bit++;                                                                  \
+    }
   QR_PUT(0x4, 4);                                  // byte mode
   QR_PUT(len, 8);                                  // count (versions 1-9)
   for (int i = 0; i < len; i++) QR_PUT((uint8_t)text[i], 8);

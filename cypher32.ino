@@ -156,6 +156,15 @@ void shiftMood(int delta, const char* why) {
   consecutiveWin  = (delta > 0) ? consecutiveWin  + 1 : 0;
 }
 
+// Forward declarations for the handful of functions used above the point they
+// are defined. The Arduino IDE generates these for you; nothing else does, so
+// writing them out is what lets the sketch be compiled by a plain compiler —
+// which is how test/render_eink.cpp checks it builds at all.
+bool          batteryPresent();
+int           getBatteryPercent();
+unsigned long nowMs();
+String        factionName(char f);
+
 // Drift mood back toward 0 if nothing has happened for a while
 void driftMood() {
   if (millis() - lastEventMs > 300000UL) {  // 5 min of quiet
@@ -1142,14 +1151,22 @@ void drawXPBar(int xp, int maxXP) {
   if (f > 0) display.fillRect(XP_BAR_X + 1, XP_BAR_Y + 1, f, XP_BAR_H - 2, BLACK);
 }
 
+// Text size has to be tracked here, because centring needs to know it and the
+// display driver will not say. Setting it behind the driver's back was making
+// every double-height line sit half its own width to the right — obvious the
+// moment the discovery screen was rendered, invisible before that.
+int curTextSize = 1;
+void setTextSize(int s) { curTextSize = s < 1 ? 1 : s; display.setTextSize(curTextSize); }
+
 void printAt(int x, int y, String t) { display.setCursor(x, y); display.print(t); }
 
 void printRight(int rx, int y, String t) {
-  display.setCursor(rx - (int)t.length() * FONT_W, y); display.print(t);
+  display.setCursor(rx - (int)t.length() * FONT_W * curTextSize, y);
+  display.print(t);
 }
 
 void printCenter(int y, String t) {
-  int x = (DISP_W - (int)t.length() * FONT_W) / 2;
+  int x = (DISP_W - (int)t.length() * FONT_W * curTextSize) / 2;
   if (x < 0) x = 0;
   display.setCursor(x, y); display.print(t);
 }
@@ -1376,9 +1393,9 @@ void displayNewNode(uint32_t id, uint8_t lvl, char fac) {
   display.clearMemory(); display.landscape();
   printCenter(16, "// NODE DETECTED");
   drawSep(28);
-  display.setTextSize(2);
+  setTextSize(2);
   printCenter(42, nodeDisplayName(id));
-  display.setTextSize(1);
+  setTextSize(1);
   // A contact you have not scouted is a signal, not a person. Show what the
   // radio actually told us — how close they are — and let recon do the rest.
   String sub = reconKnows(n, RECON_T_LEVEL)
@@ -1497,8 +1514,10 @@ String jesc(const String& s) {
 }
 
 String factionName(char f) {
-  if (f == 'B') return "BLACK";  if (f == 'W') return "WHITE";
-  if (f == 'R') return "RED";    if (f == 'G') return "GREEN";
+  if (f == 'B') return "BLACK";
+  if (f == 'W') return "WHITE";
+  if (f == 'R') return "RED";
+  if (f == 'G') return "GREEN";
   return "?";
 }
 

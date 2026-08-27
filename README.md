@@ -10,6 +10,35 @@ The game runs on a **Heltec Wireless Paper V1.2** — an ESP32-S3 with a 250×12
 
 Your character is always watching you from the display. Its mood changes with your performance.
 
+<table>
+<tr>
+<td width="55%"><img src="docs/img/eink-idle.png" alt="The e-ink display: name, faction, level, battery, the hooded character, XP and skill bars"></td>
+<td width="45%"><img src="docs/img/portal-radar.png" alt="The Radar tab: one backdoored node, one half-scouted, one on cooldown, one unidentified"></td>
+</tr>
+<tr>
+<td align="center"><sub>The device. Everything it knows, at a glance.</sub></td>
+<td align="center"><sub>The portal. Everyone in range, and how much of them you have read.</sub></td>
+</tr>
+</table>
+
+> Every image in this README is generated from the source, not mocked up. The
+> e-ink screens are rendered by running the sketch's own drawing code into a
+> framebuffer; the portal screenshots load the same HTML the ESP32 serves.
+> `cd test && make shots` rebuilds them all.
+
+---
+
+## Contents
+
+- [Hardware](#hardware) — what you need to buy
+- [First-time setup](#first-time-setup) — flash, power, join, play
+- [Web portal](#web-portal) — the command interface
+- [Factions](#factions) · [Skills](#skills) · [Levelling](#levelling)
+- [How hacking works](#how-hacking-works) — recon, intel tiers, the roll
+- [Device screens](#device-screens) — every e-ink state
+- [LoRa protocol](#lora-protocol) — what actually goes over the air
+- [Building and testing](#building-and-testing)
+
 ---
 
 ## Hardware
@@ -57,6 +86,8 @@ The device is already broadcasting. An open Wi-Fi network named **`Cypher32`** a
 
 ### Step 3 — Connect
 
+<img src="docs/img/eink-setup-qr.png" width="440" alt="The join screen: a QR code beside SCAN TO JOIN, the SSID, and 'No password. Then 192.168.4.1'">
+
 The device shows a **Wi-Fi QR code** on its screen. Point your camera at it and
 your phone offers to join — no typing an SSID. (Any time later, HUD → SHOW JOIN
 QR ON DEVICE puts it back up for a minute so someone else can scan it.)
@@ -79,6 +110,8 @@ and setting a password.
 
 ### Step 4 — Choose your faction and set a password
 
+<img src="docs/img/portal-setup.png" width="280" align="right" alt="The first-run wizard: four faction cards to choose from">
+
 The setup screen asks two things:
 
 1. **Faction** — your allegiance, your combat style, your starting advantage. Not reversible without a full wipe. Choose what fits how you fight (see [Factions](#factions)).
@@ -100,7 +133,11 @@ name your messages arrive under. Nothing about the name is ever transmitted.
 There are 576 possible names, so a collision between two devices is unlikely
 but not impossible once you have a few dozen in play.
 
+<br clear="all">
+
 The display comes alive:
+
+<img src="docs/img/eink-idle.png" width="440" alt="The idle screen">
 
 - Name, faction, and level in the header
 - Your character — idle for now, watching
@@ -126,6 +163,19 @@ seconds once you've been discovered.
 ## Web portal
 
 Your command interface. Connect to the device's Wi-Fi and open **192.168.4.1**.
+
+<table>
+<tr>
+<td><img src="docs/img/portal-hud.png" alt="HUD tab"></td>
+<td><img src="docs/img/portal-log.png" alt="Log tab"></td>
+<td><img src="docs/img/portal-cfg.png" alt="Config tab"></td>
+</tr>
+<tr>
+<td align="center"><sub><b>HUD</b> — who you are, what you have, whether the radio is alive</sub></td>
+<td align="center"><sub><b>Log</b> — the last 20 things that happened</sub></td>
+<td align="center"><sub><b>Config</b> — contact alert, password, the way out</sub></td>
+</tr>
+</table>
 
 | Tab | Function |
 |-----|----------|
@@ -213,6 +263,9 @@ FADING. That is *all* you get. No name, no faction, no level. An unscouted
 contact is a signal, not a person.
 
 **2. Run recon.**  
+
+<img src="docs/img/portal-recon.png" width="300" align="right" alt="The recon mini-game: a 3x3 grid with one tile lit, and beneath it the intel panel with codename, faction, level and brute filled in while stealth, firewall and backdoor are still locked">
+
 Recon is a **sequence-memory game**, and it is how anybody becomes somebody. A
 grid of tiles flashes a pattern; repeat it. Each round adds one step. Every
 round you clear strips another layer off the target — and the layer lands the
@@ -227,6 +280,8 @@ moment the round does, while you are still playing:
 | 8 | their **Stealth** |
 | 9 | their **Firewall** — the Radar stops saying "odds unknown" |
 | 10 | a **backdoor** |
+
+<br clear="all">
 
 The furthest round you complete is also your recon score, worth `score × 1.5%`
 on your hack odds — a perfect run gives the full **+15%**, putting a level
@@ -267,6 +322,16 @@ about them goes dark again, unless you took the backdoor.
 
 Both cooldowns survive a reboot and survive the target walking out of range, so
 neither can be reset by power-cycling or waiting for them to drop off your radar.
+
+<img src="docs/img/portal-msgs.png" width="280" align="right" alt="The Msgs tab: a target picker, a 32-character field, and the inbox">
+
+**Talk to them.** 32 characters, straight over the air, no server in between.
+Sending someone a message identifies you to them for free — you signed it by
+sending it — but it buys them no odds against you. That is the only social
+channel in the game, and it is the one people actually use: half of what
+happens at a meet-up is negotiated in 32-character bursts.
+
+<br clear="all">
 
 **Hit chance** — one roll, made on the defender's device:
 ```
@@ -329,9 +394,9 @@ Airtime is metered against the EU 868 duty cycle limit and diagnostics live at
 
 ---
 
-## Display
+## Device screens
 
-The e-ink screen only refreshes when something happens — a hack result, an incoming message, a level-up, or a mood shift every 10 minutes. No wasted cycles. No flicker mid-play.
+The e-ink screen only refreshes when something happens — a hack result, an incoming message, a level-up, or a mood shift every 10 minutes. No wasted cycles. No flicker mid-play, and nothing at all drawn while the radio is busy.
 
 - **Header** — name, faction initial, level, battery %
 - **Character** — idle / focused / victory / defeat
@@ -340,9 +405,46 @@ The e-ink screen only refreshes when something happens — a hack result, an inc
 
 The character notices when you're losing.
 
+<table>
+<tr>
+<td><img src="docs/img/eink-newnode-unknown.png" alt="NODE DETECTED, UNKNOWN-0002, DISTANT"></td>
+<td><img src="docs/img/eink-newnode.png" alt="NODE DETECTED, VoidShell, LVL 9 WHITE"></td>
+</tr>
+<tr>
+<td align="center"><sub>Someone arrives. You do not know who yet — that is what recon is for.</sub></td>
+<td align="center"><sub>The same screen once you have read them.</sub></td>
+</tr>
+<tr>
+<td><img src="docs/img/eink-hack-win.png" alt="Hack succeeded"></td>
+<td><img src="docs/img/eink-hack-lose.png" alt="Hack failed"></td>
+</tr>
+<tr>
+<td align="center"><sub>You are in.</sub></td>
+<td align="center"><sub>You are not. Your character has opinions about it.</sub></td>
+</tr>
+<tr>
+<td><img src="docs/img/eink-message.png" alt="Incoming message"></td>
+<td><img src="docs/img/eink-levelup.png" alt="Level up"></td>
+</tr>
+<tr>
+<td align="center"><sub>32 characters, straight off the air.</sub></td>
+<td align="center"><sub>A skill point is waiting in the portal.</sub></td>
+</tr>
+<tr>
+<td><img src="docs/img/eink-armed.png" alt="Factory reset armed"></td>
+<td><img src="docs/img/eink-wiping.png" alt="Wiping"></td>
+</tr>
+<tr>
+<td align="center"><sub>Two taps of RST. Nothing has happened yet.</sub></td>
+<td align="center"><sub>Let go and it stops. Keep holding and it does not.</sub></td>
+</tr>
+</table>
+
 ---
 
-## File structure
+## Building and testing
+
+### File structure
 
 | File | Purpose |
 |------|---------|
@@ -354,18 +456,47 @@ The character notices when you're losing.
 | `cypher32_qr.h` | Minimal QR encoder for the Wi-Fi join code |
 | `platformio.ini` | PlatformIO build config |
 | `ROADMAP.md` | Development plan and current status |
-| `test/` | Host-side tests — `cd test && make` |
+| `test/` | Everything below |
+| `docs/img/` | Generated — see `make shots` |
 
-## Tests
+### Tests
 
 ```
-cd test && make          # link layer, two-node simulation, portal
-cd test && make asan     # same, under AddressSanitizer + UBSan
+cd test && make          # everything
+cd test && make asan     # the C++ suites under AddressSanitizer + UBSan
+cd test && make shots    # regenerate every image in docs/img
 ```
 
-These compile the real headers against Arduino/RadioLib stubs and run the portal
-against a DOM shim. They exercise logic, not radios — see `ROADMAP.md` for what
-still needs verifying on hardware.
+| Stage | What it does |
+|-------|--------------|
+| `lint` | Every ALL-CAPS constant in the sketch resolves to a `#define` |
+| `sketch` | **Compiles `cypher32.ino`** against host stubs in `test/stub/` |
+| `run` | Link layer (169 checks) and a two-node radio simulation over a lossy channel (31) |
+| `portal` | The real portal HTML against a DOM shim — render, the mini-game, the alert |
+| `qr` | The encoder against `python-qrcode`, then the result decoded by OpenCV |
+
+Two of those are worth spelling out, because there is **no ESP32 toolchain in
+this repository** and nothing else covers what they cover:
+
+**`make sketch` builds the firmware.** `test/render_eink.cpp` includes
+`cypher32.ino` and links it against stubs for the display, Wi-Fi, NVS, the web
+server and the radio. It will not catch a bad pin mapping or a linker script
+problem, but it catches every typo, every changed signature and every missing
+declaration before the Arduino IDE does.
+
+**The e-ink screens are rendered, not photographed.** The same program runs the
+sketch's own `displayIdle()`, `displayNewNode()` and friends into a 250×122
+framebuffer and dumps it. That is where the images in this README come from,
+and it is why they cannot drift from the code. It also means the join QR can be
+scanned off the panel as the panel would actually draw it — three pixels per
+module, beside two lines of text — which `test_qr_panel.py` does on every run.
+
+The portal screenshots come from `test/shoot_portal.js`, which loads the same
+HTML blob the device serves into headless Chromium and answers its API calls.
+It needs Chromium and Pillow, so it is not part of `make`.
+
+None of this substitutes for the bench test and field protocol in
+`ROADMAP.md` — it exercises logic and pixels, not radios.
 
 ---
 
