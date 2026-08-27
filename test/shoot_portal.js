@@ -121,12 +121,19 @@ const REVEALS = {
   await page.waitForTimeout(150);
 
   const shots = [];
-  async function shot(name, note) {
+  // Fit the viewport to the tab rather than shooting a fixed phone and leaving
+  // half a screen of black under the short ones. The tab bar is position:fixed,
+  // so it follows the resize and stays where it belongs.
+  async function shot(name, note, fixedHeight) {
     await page.waitForTimeout(220);
+    const h = fixedHeight || await page.evaluate(() =>
+      Math.min(1500, Math.max(520, document.body.scrollHeight + 8)));
+    await page.setViewportSize({ width: 400, height: h });
+    await page.waitForTimeout(180);
     const file = path.join(OUT, `portal-${name}.png`);
     await page.screenshot({ path: file, fullPage: false });
     shots.push(name);
-    console.log(`  ${name.padEnd(10)} ${note}`);
+    console.log(`  ${name.padEnd(10)} ${String(h).padStart(4)}px  ${note}`);
   }
 
   await shot("hud", "level, XP, skills, radio");
@@ -155,7 +162,9 @@ const REVEALS = {
     document.getElementById("seqgrid").children[4].className = "lit";
     document.getElementById("seqmsg").textContent = "Your turn — repeat it.";
   });
-  await shot("recon", "the dossier coming apart, round by round");
+  const modalH = await page.evaluate(() =>
+    document.querySelector("#seqmodal .card").getBoundingClientRect().height + 40);
+  await shot("recon", "the dossier coming apart, round by round", Math.ceil(modalH));
   await page.evaluate(() => { seqAccepting = false; seqPlaying = false;
                               document.getElementById("seqmodal").className = "modal hide" });
 
@@ -166,8 +175,9 @@ const REVEALS = {
   await page.evaluate(() => tab("cfg"));
   await shot("cfg", "contact alert, password, reset");
 
-  // First run, before any of the above exists.
-  await page.evaluate(() => { S = { configured: false }; render() });
+  // First run, before any of the above exists. Step 2 is the interesting one:
+  // the choice you cannot take back without wiping the character.
+  await page.evaluate(() => { S = { configured: false }; render(); step(2) });
   await shot("setup", "first boot — pick a faction");
 
   await browser.close();
