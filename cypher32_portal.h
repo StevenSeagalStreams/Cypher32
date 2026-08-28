@@ -24,7 +24,11 @@ static const char PORTAL_HTML[] PROGMEM = R"PORTAL(<!DOCTYPE html><html lang="en
    with it the 300 ms the browser otherwise waits before firing click. Pinch
    zoom still works; only the tap delay goes. */
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;touch-action:manipulation}
+/* viewport-fit=cover lets the tab bar reach into the home-indicator strip, but
+   it also lets the top of the page slide under the phone's status bar. Pay the
+   top inset back here or the header sits behind the clock. */
 body{margin:0;background:#05080a;color:#c8f5c8;font:14px/1.45 ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+ padding-top:env(safe-area-inset-top);
  padding-bottom:calc(64px + env(safe-area-inset-bottom))}
 h1,h2,h3{margin:0 0 8px;font-weight:600;letter-spacing:.5px}
 a{color:#5fe08a}
@@ -63,8 +67,14 @@ textarea{min-height:64px;resize:none}
 .bars i:nth-child(1){height:4px}.bars i:nth-child(2){height:7px}
 .bars i:nth-child(3){height:10px}.bars i:nth-child(4){height:14px}
 .pips{letter-spacing:3px;color:#7dffa8}
-.banner{position:fixed;left:10px;right:10px;top:10px;z-index:100;padding:12px 14px;border-radius:10px;
- font-size:13px;font-weight:600;display:none;border:1px solid;box-shadow:0 6px 24px #000a}
+/* Sticky and in the flow, not floating over the page. It used to be
+   position:fixed, which parked it on top of whatever was at the top of the
+   tab — usually your own name and level — and there was no way to read what
+   was underneath. In flow it pushes the page down instead, and being sticky it
+   still follows you as you scroll. display:none costs no height, so a page
+   with nothing to say looks exactly as it did. */
+.banner{position:sticky;top:env(safe-area-inset-top);z-index:100;padding:12px 14px;
+ font-size:13px;font-weight:600;display:none;border-bottom:1px solid;box-shadow:0 6px 18px #000a}
 .banner.go{display:block;background:#0d2418;color:#8dffb4;border-color:#2f6b47}
 .banner.bad{display:block;background:#2a1010;color:#ffb0b0;border-color:#8a3030}
 .banner.wait{display:block;background:#0f1c2a;color:#a8d4ff;border-color:#2f4f6b}
@@ -81,10 +91,19 @@ textarea{min-height:64px;resize:none}
 .fc{border:1px solid #24402f;border-radius:10px;padding:12px;margin-bottom:10px;cursor:pointer;background:#0a1013}
 .fc.sel{border-color:#7dffa8;background:#0f2418}
 .step{display:none}.step.on{display:block}
-.modal{position:fixed;inset:0;background:#000c;z-index:200;display:flex;align-items:center;
- justify-content:center;padding:16px}
-.modal .card{max-width:380px;width:100%;margin:0}
-.seq{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:12px 0}
+/* margin:auto on the child, not align-items:center on the parent. Centring a
+   flex child that is taller than its container pushes the overflow off BOTH
+   ends and makes the top unscrollable — which is why the recon game could not
+   be seen whole on anything smaller than a large phone without zooming out.
+   With auto margins it centres when it fits and scrolls when it does not. */
+.modal{position:fixed;inset:0;background:#000c;z-index:200;display:flex;
+ justify-content:center;padding:12px;overflow-y:auto;-webkit-overflow-scrolling:touch}
+.modal .card{max-width:380px;width:100%;margin:auto;padding:12px}
+/* Tied to the viewport height, so the board shrinks on a short phone rather
+   than pushing the intel panel off the bottom. 40vh keeps the tiles above 68px
+   even on a 568px screen, which is still half again the 44px tap minimum. */
+.seq{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:8px auto;
+ max-width:min(300px,40vh)}
 /* No transition in the resting state: a tile must light on the very frame the
    finger lands, with no 80 ms ramp in front of it. The ease is only on the way
    back out, added with .fade at the moment the light is released. */
@@ -94,12 +113,14 @@ textarea{min-height:64px;resize:none}
 .seq div.bad{background:#ff8080;border-color:#ff8080}
 .seq div.fade{transition:background .14s linear,border-color .14s linear}
 .seq.locked div{cursor:default}
+.seqbtns{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}
+.seqbtns button{margin:0}
 .seqhead{display:flex;justify-content:space-between;align-items:baseline}
 .seqhead b{font-size:22px;color:#7dffa8}
 /* The dossier. Rows sit locked and dim with the round that buys them, then
    snap to full contrast the instant that round lands. */
 .ir{display:flex;justify-content:space-between;align-items:baseline;gap:8px;
- padding:4px 0;border-bottom:1px solid #16261d;font-size:13px}
+ padding:2px 0;border-bottom:1px solid #16261d;font-size:12px;line-height:1.35}
 .ir:last-child{border-bottom:0}
 .ir .k{color:#4d7a5f;letter-spacing:1px;font-size:11px;text-transform:uppercase}
 .ir .v{color:#2f4a3a;font-variant-numeric:tabular-nums}
@@ -140,8 +161,10 @@ textarea{min-height:64px;resize:none}
     <div class="xs mut" id="seqfoot">Each round you clear strips off another
     layer. A perfect <b id="seqmax">10</b> leaves a backdoor open: their file
     stops expiring and keeps itself up to date. Three attempts per node.</div>
-    <button id="seqbtn" onclick="seqBegin()">START</button>
-    <button class="btn ghost" onclick="seqQuit()">Cancel</button>
+    <div class="seqbtns">
+      <button id="seqbtn" onclick="seqBegin()">START</button>
+      <button class="btn ghost" onclick="seqQuit()">Cancel</button>
+    </div>
   </div>
 </div>
 
@@ -598,6 +621,7 @@ function seqOpen(id,name,max,node){
     g.appendChild(d);
   }
   intelSeed(seqNode);
+  $("seqfoot").className="xs mut";
   $("seqmodal").className="modal";
   // Open the link first. The target's file has to be in hand before the game
   // starts, or the reveals could not land round by round — and if nobody
@@ -682,6 +706,10 @@ function seqFlash(i,cls,ms){
 function seqBegin(){
   if(seqPlaying)return;
   seqPlaying=true;$("seqbtn").disabled=true;
+  // The rules paragraph is for deciding whether to play, not for while you are
+  // playing — and on a short phone it is the difference between the dossier
+  // fitting on screen and not.
+  $("seqfoot").className="xs mut hide";
   seqOrder=[];seqBest=0;
   seqNextRound();
 }

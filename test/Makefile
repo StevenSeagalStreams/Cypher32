@@ -36,6 +36,7 @@ portal:
 	  node --check portal/portal.js && echo "portal.js parses OK"; \
 	  cat portal/shim.js portal/portal.js portal/driver.js > portal/.run.js; \
 	  node portal/.run.js || exit 1; \
+	  NODE_PATH=$${NODE_PATH:-/opt/node22/lib/node_modules} node portal/layout.js || exit 1; \
 	else echo "node not found — skipping portal render tests"; fi
 
 qr: test_qr test_qr_mask render_eink

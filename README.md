@@ -473,6 +473,7 @@ cd test && make shots    # regenerate every image in docs/img
 | `sketch` | **Compiles `cypher32.ino`** against host stubs in `test/stub/` |
 | `run` | Link layer (169 checks) and a two-node radio simulation over a lossy channel (31) |
 | `portal` | The real portal HTML against a DOM shim — render, the mini-game, the alert |
+| `layout` | The page in real Chromium at five phone sizes — nothing off-screen, nothing unreachable |
 | `qr` | The encoder against `python-qrcode`, then the result decoded by OpenCV |
 
 Two of those are worth spelling out, because there is **no ESP32 toolchain in
