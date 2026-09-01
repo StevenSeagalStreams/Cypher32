@@ -261,6 +261,23 @@ String myFaction   = "NONE";
 String hackedList = "";
 String failList   = "";   // 12 h retry cooldowns (T4.4)
 String pwnedList  = "";   // backdoors, which outlive both of the above
+
+// ── the record ────────────────────────────────
+// The game counted nothing that lasted. hackedList and failList hold
+// timestamps that listPrune() deletes when they expire, the event log is 20
+// entries of RAM that a reboot clears, and a level tells you where you are but
+// not what it took. Ask a player what they have done and there was no answer
+// anywhere in the firmware.
+//
+// These are the answer. Every one of them is something this device witnessed
+// itself: a verdict it received, an attack it survived, a contact it heard.
+// Nothing here is taken on anybody else's word.
+int statWon      = 0;   // hacks you landed
+int statLost     = 0;   // hacks that bounced
+int statBreached = 0;   // times someone got through your firewall
+int statHeld     = 0;   // times it held
+int statMet      = 0;   // distinct contacts ever discovered
+int statBestSeq  = 0;   // furthest recon sequence ever cleared
 String hackPendingId = "";   // target of the hack currently awaiting a verdict
 
 // 7 days in milliseconds
@@ -429,6 +446,12 @@ void saveProgress() {
   preferences.putString("hacked", hackedList);
   preferences.putString("failed", failList);
   preferences.putString("pwned",  pwnedList);
+  preferences.putInt("t_won",  statWon);
+  preferences.putInt("t_lost", statLost);
+  preferences.putInt("t_brch", statBreached);
+  preferences.putInt("t_held", statHeld);
+  preferences.putInt("t_met",  statMet);
+  preferences.putInt("t_seq",  statBestSeq);
   preferences.putInt("lvl",    myLevel);
   preferences.putInt("xp",     myXP);
   preferences.putInt("sp",     skillPoints);
@@ -454,6 +477,12 @@ void loadProgress() {
   hackedList    = preferences.getString("hacked", "");
   failList      = preferences.getString("failed", "");
   pwnedList     = preferences.getString("pwned",  "");
+  statWon       = preferences.getInt("t_won",  0);
+  statLost      = preferences.getInt("t_lost", 0);
+  statBreached  = preferences.getInt("t_brch", 0);
+  statHeld      = preferences.getInt("t_held", 0);
+  statMet       = preferences.getInt("t_met",  0);
+  statBestSeq   = preferences.getInt("t_seq",  0);
   myLevel       = preferences.getInt("lvl",    1);
   myXP          = preferences.getInt("xp",     0);
   skillPoints   = preferences.getInt("sp",     0);
@@ -1571,6 +1600,16 @@ String buildStateJson() {
   j += "\"pending\":"    + String((loraActionPending() || hackInFlight) ? "true" : "false");
   j += "},";
 
+  // The record. Six numbers this device saw for itself, and the only part of
+  // the game that keeps counting after LVL 32.
+  j += "\"stats\":{";
+  j += "\"won\":"      + String(statWon)      + ",";
+  j += "\"lost\":"     + String(statLost)     + ",";
+  j += "\"breached\":" + String(statBreached) + ",";
+  j += "\"held\":"     + String(statHeld)     + ",";
+  j += "\"met\":"      + String(statMet)      + ",";
+  j += "\"bestSeq\":"  + String(statBestSeq)  + "},";
+
   // The mini-game watches this to know when the target has answered and the
   // dossier is staged, or when to admit it never will.
   j += "\"probe\":{\"id\":\"" + chipIdStr(reconProbe.target) + "\",";
@@ -1927,6 +1966,7 @@ void handleApiAction() {
                   nid0.c_str(), score, n->recon_score, n->intel,
                   (n->recon_score * RECON_MAX_BONUS) / RECON_MAX_SEQ);
     if (score > 0) logEvent(EV_RECON, target, score);
+    if (score > statBestSeq) statBestSeq = score;
     if (n->pwned)  shiftMood(+1, "walked back in through a backdoor");
     reconProbe.state = RECON_PROBE_IDLE;
     apiOk("Recon logged — sequence " + String(score));
@@ -2033,6 +2073,7 @@ void resolveHackVerdict() {
                 result.xpDelta, result.note.c_str());
 
   logEvent(effectiveWin ? EV_HACK_WON : EV_HACK_LOST, target, result.xpDelta);
+  if (effectiveWin) statWon++; else statLost++;
   shiftMood(effectiveWin ? +2 : -2, effectiveWin ? "won a hack" : "lost a hack");
 
   bool lvlUp = false;
@@ -2289,6 +2330,7 @@ void loop() {
   while (loraPopScoutedBy(&peer)) logEvent(EV_SCOUTED, peer, 0);
   if (revertIdleAtMs == 0 && loraPopNewNode(&peer)) {
     logEvent(EV_DISCOVER, peer, 0);
+    statMet++;
     KnownNode* nn = findNode(peer);
     displayNewNode(peer, nn ? nn->level : 0, nn ? nn->faction : '?');
     revertIdleAtMs = millis() + 5000;
@@ -2318,6 +2360,8 @@ void loop() {
                   who.c_str(), pendingHackAttackerWon ? "won" : "was held off");
     uint32_t whoId = (uint32_t)strtoul(who.c_str(), nullptr, 16);
     logEvent(pendingHackAttackerWon ? EV_BREACHED : EV_HELD, whoId, 0);
+    if (pendingHackAttackerWon) statBreached++; else statHeld++;
+    saveProgress();                       // a defence is progress too
     if (pendingHackAttackerWon) {
       shiftMood(-1, "breached by a peer");
       displayHackFailed(who, 0, "Breached by " + nodeDisplayName(whoId));

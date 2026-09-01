@@ -41,6 +41,12 @@ const STATE = {
       brute: 35, stealth: 35, firewall: 35, odds: 90,
       hackWon: true, cooldownMs: 43100000, canHack: true, canRecon: true,
       unread: true, msg: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+    { id: "beef0007", name: "DuskRelay", level: 8, faction: "W", avgRssi: -70,
+      bars: 3, proximity: "CLOSE", status: "ACTIVE", ageMs: 9000, recon: 1,
+      reconScore: 8, reconMax: 10, intel: 8, pwned: false,
+      brute: 4, stealth: 6, firewall: 5, odds: 60,
+      hackWon: false, cooldownMs: 0, canHack: true, canRecon: true,
+      unread: false, msg: "" },
     { id: "beef0003", name: "UNKNOWN-0003", level: 0, faction: "?", avgRssi: -91,
       bars: 2, proximity: "DISTANT", status: "ACTIVE", ageMs: 8000, recon: 0,
       reconScore: 0, reconMax: 10, intel: 0, pwned: false,
@@ -106,6 +112,35 @@ const fail = (w) => { console.log("  FAIL:", w); bad++; };
       if (over.scrollW > over.vw + 0.5)
         fail(`${label} ${t}: page scrolls sideways (${over.scrollW} > ${over.vw})`);
     }
+
+    // ── 1b. a bar that renders at zero width is not a bar ──
+    // The census fills were spans, and width does not apply to an inline box,
+    // so every bar drew as an empty track. Nothing without a layout engine can
+    // see that: the markup was correct and the style attribute was present.
+    await page.evaluate(() => tab("hud"));
+    await page.waitForTimeout(90);
+    const bars = await page.evaluate(() => {
+      const out = [];
+      document.querySelectorAll("#census .cen").forEach((row) => {
+        const f = row.querySelector(".f"), t = row.querySelector(".t");
+        out.push({ fill: Math.round(f.getBoundingClientRect().width),
+                   track: Math.round(t.getBoundingClientRect().width),
+                   n: Number(row.querySelector(".c").textContent) });
+      });
+      return out;
+    });
+    const counted = bars.filter(b => b.n > 0);
+    if (!counted.length) fail(`${label}: census drew no populated bars`);
+    if (counted.some(b => b.fill === 0))
+      fail(`${label}: a census bar with a non-zero count rendered 0px wide ` +
+           `— the fill is not a block box`);
+    if (counted.some(b => b.fill > b.track + 1))
+      fail(`${label}: a census fill overflows its track`);
+    const big = counted.reduce((a, b) => (b.n > a.n ? b : a), counted[0]);
+    const small = counted.reduce((a, b) => (b.n < a.n ? b : a), counted[0]);
+    if (big.n > small.n && big.fill <= small.fill)
+      fail(`${label}: the larger faction does not draw a longer bar ` +
+           `(${big.n}->${big.fill}px vs ${small.n}->${small.fill}px)`);
 
     // ── 2. the banner pushes content down, it does not sit on top of it ──
     await page.evaluate(() => { tab("hud"); banner("WAITING FOR REPLY (2/4)…", "wait", true) });

@@ -3,10 +3,10 @@
 
 // T4.7 — the single source of truth for the version. Shown in the portal
 // Config tab and in /api/diag.
-#define FIRMWARE_VERSION "v66"
+#define FIRMWARE_VERSION "v67"
 
 // ─────────────────────────────────────────────
-//  CYPHER32 LORA PACKET PROTOCOL  — v64
+//  CYPHER32 LORA PACKET PROTOCOL  — v67
 // ─────────────────────────────────────────────
 //
 //  Link layer on top of the raw driver:

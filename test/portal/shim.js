@@ -10,7 +10,12 @@ function _listen(t,f){if(!this.__l)this.__l={};(this.__l[t]=this.__l[t]||[]).pus
 // Replacing innerHTML destroys the nodes that were there. The memo in made{}
 // has to forget them too, or a test reads a stale textContent off an element
 // the page has already thrown away and re-created.
-function _inner(o){let v="";Object.defineProperty(o,"innerHTML",{
+// The DOM coerces whatever you assign to textContent into a string. The shim
+// stored it raw, so `el.textContent = 12` compared unequal to "12" and a test
+// could not tell a working render from a broken one.
+function _text(o){let v="";Object.defineProperty(o,"textContent",{
+  get(){return v},set(x){v=x==null?"":String(x)}});return o}
+function _inner(o){_text(o);let v="";Object.defineProperty(o,"innerHTML",{
   get(){return v},
   set(x){
     const gone=String(v).match(/id="([^"]+)"/g)||[];
@@ -18,10 +23,10 @@ function _inner(o){let v="";Object.defineProperty(o,"innerHTML",{
     v=x; if(x==="")o.children.length=0;
   }});return o}
 function _el(id){return made[id]||(made[id]=_inner({id,style:{},dataset:{},className:"",
-  textContent:"",value:"",disabled:false,children:[],
+  value:"",disabled:false,children:[],
   appendChild(c){this.children.push(c)},addEventListener:_listen}))}
 globalThis.__made=made; globalThis.__el=_el;
-function _mk(tag){return _inner({tagName:tag,className:"",textContent:"",
+function _mk(tag){return _inner({tagName:tag,className:"",
   dataset:{},style:{},children:[],onclick:null,
   appendChild(c){this.children.push(c)},addEventListener:_listen})}
 // Dispatch to whatever the page actually bound. Returns the event so a test can

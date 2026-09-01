@@ -67,6 +67,25 @@ textarea{min-height:64px;resize:none}
 .bars i:nth-child(1){height:4px}.bars i:nth-child(2){height:7px}
 .bars i:nth-child(3){height:10px}.bars i:nth-child(4){height:14px}
 .pips{letter-spacing:3px;color:#7dffa8}
+/* Standings and census. The bar is a track plus a fill, the same idiom the
+   device's own skill bars use, so the two screens read as one thing. */
+.lb{display:flex;align-items:baseline;gap:8px;padding:5px 0;border-bottom:1px solid #12201a;font-size:13px}
+.lb:last-of-type{border-bottom:0}
+.lb.me{color:#b6ffcf;font-weight:600}
+.lb .r{color:#4d7a5f;min-width:20px;font-size:11px}
+.lb .n{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lb .v{color:#7dffa8;font-variant-numeric:tabular-nums}
+.lb.un .n,.lb.un .v{color:#5c7a66}
+.cen{display:flex;align-items:center;gap:8px;padding:3px 0;font-size:12px}
+.cen .k{min-width:58px;color:#8fa79a;letter-spacing:.5px}
+.cen .t{flex:1;height:12px;background:#0d1a12;border:1px solid #23402e;border-radius:3px;overflow:hidden}
+/* display:block or the width is ignored — a span is inline, and an inline
+   box takes its width from its content, which here is nothing at all. */
+.cen .f{display:block;height:100%;background:#2f9e5c}
+.cen .c{min-width:20px;text-align:right;color:#b6ffcf;font-variant-numeric:tabular-nums}
+.cen.fB .f{background:#3a6bb5}.cen.fW .f{background:#8fa3b8}
+.cen.fR .f{background:#b54545}.cen.fG .f{background:#3f9159}
+.cen.fq .f{background:#33413a}
 /* Sticky and in the flow, not floating over the page. It used to be
    position:fixed, which parked it on top of whatever was at the top of the
    tab — usually your own name and level — and there was no way to read what
@@ -247,6 +266,27 @@ textarea{min-height:64px;resize:none}
         <div class="stat"><b id="hbr">0</b><span class="xs mut">BRUTE</span></div>
         <div class="stat"><b id="hst">0</b><span class="xs mut">STEALTH</span></div>
         <div class="stat"><b id="hfw">0</b><span class="xs mut">FIREWALL</span></div>
+      </div>
+      <div class="card">
+        <div class="ct">Standings</div>
+        <div id="board"></div>
+        <p class="xs mut" id="boardnote" style="margin-bottom:0"></p>
+      </div>
+      <div class="card">
+        <div class="ct">Faction census</div>
+        <div id="census"></div>
+        <p class="xs mut" id="censusnote" style="margin-bottom:0"></p>
+      </div>
+      <div class="card">
+        <div class="ct">Your record</div>
+        <div class="kv"><span class="mut">Hacks landed</span><span id="rwon">0</span></div>
+        <div class="kv"><span class="mut">Hacks bounced</span><span id="rlost">0</span></div>
+        <div class="kv"><span class="mut">Firewall held</span><span id="rheld">0</span></div>
+        <div class="kv"><span class="mut">Breached by others</span><span id="rbrch">0</span></div>
+        <div class="kv"><span class="mut">Contacts met</span><span id="rmet">0</span></div>
+        <div class="kv"><span class="mut">Best recon run</span><span id="rseq">0</span></div>
+        <p class="xs mut" style="margin-bottom:0">Counted by this device, from
+        what it saw itself. Survives a reboot, and keeps counting past LVL 32.</p>
       </div>
       <div class="card">
         <div class="ct">Network</div>
@@ -875,6 +915,78 @@ function newContacts(nodes){
   return fresh;
 }
 
+// ── standings and census ──
+//
+// Both are built from what this device heard for itself. Nothing is forwarded,
+// nothing is taken on another player's word, and there is no roster on the air:
+// every number below comes out of S.nodes, which the page already has.
+//
+// The important decision is that recon GATES the board rather than the board
+// leaking recon. A ranking needs a level, level is intel tier 6, so a contact
+// you have not read to round 6 simply cannot be placed — they sit under the
+// list as unidentified. That turns the standings into a to-do list for the
+// mini-game instead of a way to skip it.
+function standings(){
+  var known=[],unknown=0;
+  (S.nodes||[]).forEach(function(n){
+    if(n.training)return;
+    if((n.intel||0)>=6&&n.level>0) known.push({name:n.name,lvl:n.level,
+                                               fac:n.faction,pwned:n.pwned});
+    else unknown++;
+  });
+  known.push({name:S.name,lvl:S.level,fac:(S.faction||"?").charAt(0),me:true});
+  // Level first, then the name, so the order is stable between polls rather
+  // than shuffling every two seconds on ties.
+  known.sort(function(a,b){return b.lvl-a.lvl||(a.name<b.name?-1:1)});
+  return {known:known,unknown:unknown};
+}
+
+function censusOf(){
+  var c={B:0,W:0,R:0,G:0,"?":0};
+  (S.nodes||[]).forEach(function(n){
+    if(n.training)return;
+    // Faction is tier 4. Below it we honestly do not know, and an aggregate is
+    // the one place we can say so without naming anybody.
+    c[((n.intel||0)>=4&&n.faction&&c[n.faction]!==undefined)?n.faction:"?"]++;
+  });
+  var mine=(S.faction||"?").charAt(0);
+  if(c[mine]!==undefined)c[mine]++;
+  return c;
+}
+
+var FACFULL={B:"BLACK",W:"WHITE",R:"RED",G:"GREEN","?":"UNKNOWN"};
+function drawBoard(){
+  var st=standings();
+  $("board").innerHTML=st.known.slice(0,8).map(function(p,i){
+    return '<div class="lb'+(p.me?" me":"")+'">'+
+      '<span class="r">'+(i+1)+'</span>'+
+      '<span class="n">'+esc(p.name)+(p.me?" (you)":"")+
+        (p.pwned?' <span class="pill fB">PWNED</span>':'')+'</span>'+
+      '<span class="pill f'+esc(p.fac)+'">'+esc(p.fac)+'</span>'+
+      '<span class="v">LVL '+p.lvl+'</span></div>'}).join("");
+  $("boardnote").textContent = st.unknown
+    ? st.unknown+" contact"+(st.unknown>1?"s":"")+" cannot be ranked yet — "+
+      "clear 6 rounds of recon on someone to place them."
+    : "Everyone you can hear is identified.";
+}
+
+function drawCensus(){
+  var c=censusOf(),total=0;
+  ["B","W","R","G","?"].forEach(function(k){total+=c[k]});
+  // Share of the room, not share of the largest faction. Scaling to the max
+  // fills every bar whenever the count is level, which reads as a broken
+  // widget rather than as a tie — and "what fraction of the people here are
+  // RED" is the question a census is actually being asked.
+  $("census").innerHTML=["B","W","R","G","?"].map(function(k){
+    return '<div class="cen '+(k==="?"?"fq":"f"+k)+'">'+
+      '<span class="k">'+FACFULL[k]+'</span>'+
+      '<span class="t"><span class="f" style="width:'+
+        (total?Math.round(c[k]*100/total):0)+'%"></span></span>'+
+      '<span class="c">'+c[k]+'</span></div>'}).join("");
+  $("censusnote").textContent=total+" heard, including you. "+
+    (c["?"]?c["?"]+" still unidentified — faction is round 4.":"All identified.");
+}
+
 // ── rendering ──
 function fmtAge(ms){var s=Math.floor(ms/1000);
   if(s<60)return s+"s ago";if(s<3600)return Math.floor(s/60)+"m ago";
@@ -901,6 +1013,12 @@ function render(){
   $("hnodes").textContent=S.nodes.length;
   $("hrssi").textContent=S.lora.rssi+" dBm";
   $("hduty").textContent=S.lora.duty.toFixed(2)+"% of 1% limit";
+
+  drawBoard(); drawCensus();
+  var t=S.stats||{};
+  $("rwon").textContent=t.won||0;    $("rlost").textContent=t.lost||0;
+  $("rheld").textContent=t.held||0;  $("rbrch").textContent=t.breached||0;
+  $("rmet").textContent=t.met||0;    $("rseq").textContent=(t.bestSeq||0)+" / 10";
 
   $("ksp").textContent=S.sp;$("kbr").textContent=S.brute;
   $("kst").textContent=S.stealth;$("kfw").textContent=S.firewall;

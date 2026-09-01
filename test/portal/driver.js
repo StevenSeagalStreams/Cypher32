@@ -352,6 +352,66 @@ globalThis.PointerEvent = function PointerEvent() {};
 seqQuit(); await settle();
 pollStop();
 
+// ── standings and census ──
+// The rule under test is that recon gates both. A contact you have not read to
+// tier 6 cannot be ranked, and one you have not read to tier 4 counts as an
+// unknown faction — so neither view can be used to skip the mini-game.
+S = {...S1, stats:{won:12,lost:5,breached:3,held:9,met:41,bestSeq:10},
+     nodes:[
+       {...S1.nodes[0], intel:10, level:9,  faction:"W", pwned:true},   // fully read
+       {...S1.nodes[1], intel:6,  level:3,  faction:"R"},               // level known
+       // Unscouted, but the DEVICE knows their faction is BLACK. The portal
+       // must not count it: this row is what proves the tier-4 gate is real
+       // rather than an accident of the JSON already saying "?".
+       {...ANON,        intel:0,  level:0,  faction:"B"},
+       {...ANON, id:"beef0009", name:"UNKNOWN-0009", intel:4, level:0, faction:"G"},
+       // A second WHITE, so the bars have different lengths and a flat render
+       // is distinguishable from a working one.
+       {...S1.nodes[0], id:"beef000a", name:"PaleFork", intel:10, level:5,
+        faction:"W", pwned:false},
+     ]};
+render();
+
+const st = standings();
+ck(st.known.length === 4, "only tier-6+ contacts are ranked, plus you: " + st.known.length);
+ck(st.unknown === 2, "the other two are counted as unrankable, got " + st.unknown);
+ck(st.known.every((p,i,a) => i === 0 || a[i-1].lvl >= p.lvl),
+   "the board is sorted by level, descending");
+ck(st.known.some(p => p.me), "you are on your own board");
+ck(!st.known.some(p => String(p.name).indexOf("UNKNOWN") === 0),
+   "an unidentified contact never appears as a ranked row");
+ck(el("board").innerHTML.includes("(you)"), "your row is marked");
+ck(el("boardnote").textContent.includes("2 contacts cannot be ranked"),
+   "the note says how many are unplaced: " + el("boardnote").textContent);
+
+// tier 4 is enough for the census even though tier 6 is not enough for the board
+const c = censusOf();
+ck(c.W === 2, "tier-10 contacts count to their faction, got " + c.W);
+ck(c.R === 1, "a tier-6 contact counts to its faction");
+ck(c.G === 1, "tier 4 is enough to be counted, even unrankable");
+ck(c["?"] === 1, "a tier-0 contact counts as unknown, not as a guess");
+ck(c.B === 1, "you count yourself — and an unscouted BLACK is NOT counted with you");
+ck(el("census").innerHTML.includes("UNKNOWN"), "the census names the unknown bucket");
+// The bars are share-of-room. If every fill comes out the same width the
+// widget is decorative, which is what happened when .f was left inline.
+const widths = (el("census").innerHTML.match(/width:(\d+)%/g) || []);
+ck(widths.length === 5, "five bars drawn, got " + widths.length);
+ck(new Set(widths).size > 1,
+   "bars differ when the counts differ, got " + widths.join(" "));
+ck(widths.every(w => Number(w.match(/\d+/)[0]) <= 100), "no bar exceeds 100%");
+ck(el("censusnote").textContent.includes("6 heard"),
+   "the census totals everyone heard: " + el("censusnote").textContent);
+
+// the record comes straight from the device and survives nothing being known
+ck(el("rwon").textContent === "12" && el("rheld").textContent === "9",
+   "the record is shown");
+ck(el("rseq").textContent === "10 / 10", "best recon run is shown out of 10");
+S = {...S1, stats:undefined, nodes:[]}; render();
+ck(el("rwon").textContent === "0", "a device with no record yet shows zeros");
+ck(censusOf()["?"] === 0 && censusOf().B === 1,
+   "an empty room still counts you and nobody else");
+S = {...S1}; render();
+
 // ── contact alert ──
 // A new node is on the e-ink for a few seconds and then gone. The phone is the
 // thing you are holding, so the phone is what has to tell you.
