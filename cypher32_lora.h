@@ -509,7 +509,12 @@ static bool armSlot(PendingTx& slot, void* pkt, int len, uint32_t delayMs) {
 // Reliable unicast for the local player's action: ACK requested, retried up to
 // TX_MAX_TRIES, outcome shown in the portal.
 bool loraSendReliable(void* pkt, int len, const char* label) {
-  if (!loraReady || len <= 0 || len > 64) return false;
+  // Must match enqueueTx()'s cap exactly. It used to read 64, so a 61-64 byte
+  // packet passed here, set the action to SENDING, and was then silently
+  // refused by the queue — the player would watch it time out as NO RESPONSE
+  // with nothing ever having been transmitted. Unreachable today at 44 bytes
+  // max, but any packet designed against "64" would land in it.
+  if (!loraReady || len <= 0 || len > (int)(64 - SIG_LEN)) return false;
   PktHeader* h = (PktHeader*)pkt;
   h->seq = txSeq++;
 
@@ -725,8 +730,12 @@ void loraHandlePacket(uint8_t* buf, int len) {
   }
   markSeen(hdr->from_id, hdr->seq);
 
-  // Any unicast asking for an ACK gets one, whatever the type.
-  if (hdr->flags & PKTFLAG_ACK_REQ) sendAck(hdr->from_id, hdr->seq, hdr->type);
+  // Any unicast asking for an ACK gets one, whatever the type. The to_id test
+  // is the load-bearing half: broadcasts reach every device in range, so a
+  // broadcast with this flag set would draw a simultaneous ACK from all of
+  // them. The comment claimed "unicast" long before the code checked for it.
+  if ((hdr->flags & PKTFLAG_ACK_REQ) && hdr->to_id != 0)
+    sendAck(hdr->from_id, hdr->seq, hdr->type);
 
   switch (hdr->type) {
     case PKT_BEACON: {

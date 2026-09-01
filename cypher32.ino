@@ -269,7 +269,13 @@ String hackPendingId = "";   // target of the hack currently awaiting a verdict
 // "6d 23h" and made a target dead for a whole event. Both locks are the same
 // 12-hour window now, kept as separate names so they can diverge again later.
 #define OWNED_LOCK_MS HALF_DAY_MS  // after a successful hack
-#define FAIL_LOCK_MS  HALF_DAY_MS  // after a failed one
+// A win should hold: you own them, and that is worth half a day. A loss should
+// not. Both were 12 h, and because canRecon() also waits on the cooldown, one
+// failed roll removed a player from your evening entirely — you could not even
+// scout them again. At an 8-person meet-up that ended the session in about
+// forty minutes. The comment above already kept these separate so they could
+// diverge; this is them diverging.
+#define FAIL_LOCK_MS  (30UL * 60000UL)   // 30 minutes after a failed one
 
 // Rebooting from inside a request handler cuts the TCP connection before the
 // response has flushed, so the browser sees a reset instead of the reply and
@@ -1524,7 +1530,15 @@ String factionName(char f) {
 String buildStateJson() {
   bool configured = !(myName == "" || myFaction == "NONE");
 
-  String j = "{";
+  // Arduino's String grows in flat 16-byte steps — changeBuffer() rounds to
+  // (len + 16) & ~0xf, with no geometric growth — so every += that crosses a
+  // boundary reallocs and copies the whole buffer. At 20 nodes this response is
+  // ~10 KB built from ~150 appends per node: on the order of 3 MB of memcpy,
+  // every 2 seconds, on a server that blocks the radio while it runs. One
+  // reserve() up front turns that back into a linear append.
+  String j;
+  j.reserve(768 + (size_t)knownCount * 512 + (size_t)eventCount * 96);
+  j += "{";
   j += "\"configured\":" + String(configured ? "true" : "false") + ",";
   j += "\"name\":\""     + jesc(myName) + "\",";
   j += "\"faction\":\""  + jesc(myFaction) + "\",";

@@ -711,6 +711,51 @@ int main() {
            0xBBBB2222, nodeNameFromId(0xBBBB2222).c_str());
   }
 
+  // ── frame-size cap: the two checks must agree ──
+  // loraSendReliable() used to test against a bare 64 while enqueueTx() tests
+  // against 64 - SIG_LEN. A packet in the gap set the action to SENDING and was
+  // then refused by the queue, so the player watched a frame that was never
+  // transmitted time out as NO RESPONSE.
+  {
+    printf("\nframe size cap\n");
+    resetAll();
+    uint8_t big[80];
+    memset(big, 0, sizeof(big));
+    mkHdr((PktHeader*)big, PKT_MSG, 0, 0, myChipID32, PEER);
+
+    CHECK(loraSendReliable(big, 60 - SIG_LEN, "FITS"),
+          "a packet at the queue's own cap is accepted");
+    resetAll();
+    CHECK(!loraSendReliable(big, 61, "TOOBIG"),
+          "a 61-byte packet is refused up front, not silently dropped later");
+    CHECK(loraActionState == LA_IDLE,
+          "and refusing it leaves no action stranded in SENDING");
+    CHECK(!enqueueTx(big, 61), "enqueueTx agrees with it");
+    CHECK(enqueueTx(big, 60 - SIG_LEN), "and both accept the same maximum");
+  }
+
+  // ── a broadcast must never be ACKed ──
+  // Every device in range would answer at once. Nothing sets ACK_REQ on a
+  // broadcast today; anything that did would take the whole room down with it.
+  {
+    printf("\nbroadcast ACK suppression\n");
+    resetAll();
+    PktBeacon b;
+    mkHdr(&b.hdr, PKT_BEACON, 7, PKTFLAG_ACK_REQ, PEER, 0);   // to_id = 0
+    b.level = 4; b.faction = 'R';
+    deliver(&b, sizeof(b));
+    CHECK(txqCountOfType(PKT_ACK) == 0,
+          "a broadcast asking for an ACK gets none");
+    CHECK(findNode(PEER) != nullptr, "but it is still processed normally");
+
+    resetAll();
+    PktPing png;
+    mkHdr(&png.hdr, PKT_PING, 8, PKTFLAG_ACK_REQ, PEER, myChipID32);
+    deliver(&png, sizeof(png));
+    CHECK(txqCountOfType(PKT_ACK) == 1,
+          "a unicast asking for an ACK still gets exactly one");
+  }
+
   // ── intel tiers ──
   // The mini-game peels a target open a tier per round. Two things have to
   // hold: the tier table is the only thing that decides what is visible, and
