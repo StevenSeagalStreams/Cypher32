@@ -129,6 +129,25 @@ uint8_t   loraBootBurst       = 0;
 String    pendingMsg     = "";
 String    pendingMsgFrom = "";
 
+// ── the last thing anyone said ───────────────
+// pendingMsg is a doorbell: loop() consumes it, clears it, and the text then
+// exists nowhere. KnownNode.msg_inbox keeps a copy per sender but carries no
+// timestamp, so it cannot be ordered — and pruneNodes() deletes the row five
+// minutes after that sender walks away, which is exactly when you would want
+// to read it again. These four survive both.
+//
+// Set at RX rather than at the consume point, so two messages arriving inside
+// one blocked loop() do not lose the first. RAM only, deliberately, for the
+// same reason the event log is: NVS writes are what wears out on this board,
+// and persisting on inbound message would let anyone in radio range drive
+// flash wear by sending you text.
+uint32_t  lastMsgFrom  = 0;
+String    lastMsgText  = "";
+uint32_t  lastMsgAt    = 0;
+uint32_t  lastSentTo   = 0;
+String    lastSentText = "";
+uint32_t  lastSentAt   = 0;
+
 // ── Things the sketch wants to know about, queued rather than flagged ──
 // A single flag loses the second event when two land close together, and
 // meeting two people at once is exactly when you most want to be told.
@@ -867,6 +886,9 @@ void loraHandlePacket(uint8_t* buf, int len) {
       if (n) {
         strncpy(n->msg_inbox, p->text, 32); n->msg_inbox[32] = '\0';
         n->msg_unread = true;
+        lastMsgFrom = p->hdr.from_id;
+        lastMsgText = String(p->text);
+        lastMsgAt   = millis();
         reconAtLeast(n, RECON_T_NAME);   // they signed the message by sending it
         pendingMsg = String(p->text); pendingMsgFrom = chipIdStr(p->hdr.from_id);
       }

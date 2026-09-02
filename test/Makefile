@@ -13,7 +13,7 @@
 
 CXX      ?= g++
 CXXFLAGS := -std=c++17 -I stub -Wall -Wno-format
-BINS     := test_link test_twonode
+BINS     := test_link test_twonode test_pages
 
 .PHONY: all run asan portal lint qr sketch shots clean
 all: lint sketch run portal qr
@@ -76,6 +76,12 @@ test_link: test_link.cpp ../cypher32_lora.h ../cypher32_packets.h ../cypher32_cr
 
 test_twonode: test_twonode.cpp ../cypher32_lora.h ../cypher32_packets.h ../cypher32_crypto.h
 	$(CXX) $(CXXFLAGS) -o $@ $<
+
+# Includes the whole sketch, like render_eink, so it exercises the real button
+# state machine and the real painters rather than a model of them.
+test_pages: test_pages.cpp ../cypher32.ino ../cypher32_lora.h ../cypher32_packets.h \
+            ../cypher32_portal.h ../cypher32_qr.h stub/heltec-eink-modules.h
+	$(CXX) -std=c++17 -I stub -w -o $@ $<
 
 clean:
 	rm -f $(BINS) test_qr test_qr_mask render_eink portal/portal.html portal/portal.js portal/.run.js

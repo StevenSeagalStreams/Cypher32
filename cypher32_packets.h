@@ -3,7 +3,7 @@
 
 // T4.7 — the single source of truth for the version. Shown in the portal
 // Config tab and in /api/diag.
-#define FIRMWARE_VERSION "v67"
+#define FIRMWARE_VERSION "v68"
 
 // ─────────────────────────────────────────────
 //  CYPHER32 LORA PACKET PROTOCOL  — v67

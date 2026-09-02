@@ -25,6 +25,7 @@ PLATFORM = {
     "BLACK", "WHITE", "SS", "MOSI", "MISO", "SCK",
     "NULL", "UINT32_MAX", "INT32_MAX", "UINT8_MAX", "INT8_MAX", "SIZE_MAX",
     "ESP", "Serial", "WiFi", "MDNS",   # Arduino global objects
+    "CHANGE", "RISING", "FALLING",     # attachInterrupt modes
 }
 PLATFORM_PREFIXES = ("RADIOLIB_", "ESP_", "ARDUINO_", "SX126", "DNS", "MDNS", "WL_")
 
@@ -32,8 +33,13 @@ defined = set(PLATFORM)
 for f in sources:
     text = f.read_text(encoding="utf-8", errors="replace")
     defined |= set(re.findall(r"^\s*#define\s+([A-Za-z_]\w*)", text, re.M))
-    defined |= set(re.findall(r"\bconst\s+(?:\w+\s+)+([A-Z][A-Z0-9_]{2,})\s*[=\[]", text))
-    defined |= set(re.findall(r"\bstatic\s+const\s+(?:\w+\s+)+([A-Z][A-Z0-9_]{2,})", text))
+    # Any const declaration, however it is spelled. The two narrow patterns
+    # this replaces missed a pointer type ("const char* LBL[]") and every
+    # declarator after the first ("const int TRACK_X = 58, TRACK_W = 170"),
+    # which made the linter reject perfectly ordinary C++ and pushed you
+    # towards renaming real constants to keep it quiet.
+    for decl in re.findall(r"\bconst\b[^;{}]*", text):
+        defined |= set(re.findall(r"\b([A-Z][A-Z0-9_]{2,})\s*(?:=|\[)", decl))
     # enum bodies, e.g. enum Foo { A_B, C_D };
     for body in re.findall(r"\benum\s+\w*\s*\{([^}]*)\}", text, re.S):
         defined |= set(re.findall(r"\b([A-Z][A-Z0-9_]{2,})\b", body))

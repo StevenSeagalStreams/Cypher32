@@ -26,9 +26,12 @@ inline void     advance(uint32_t ms) { g_millis += ms; }
 
 inline void pinMode(int, int) {}
 inline void digitalWrite(int, int) {}
-// Held high so the sketch sees an unpressed button; the reset arming logic
-// walks the same path it does on the bench.
-inline int  digitalRead(int) { return HIGH; }
+// Pin levels the test can drive. Defaults high, so an unpoked sketch sees an
+// unpressed button and the reset arming logic walks the same path it does on
+// the bench. test_pages.cpp uses this to hold PRG down across a simulated
+// display blackout, which is the only way to reach the wipe-timer guard.
+extern int g_pinLevel[64];
+inline int  digitalRead(int p) { return (p >= 0 && p < 64) ? g_pinLevel[p] : HIGH; }
 inline int  analogRead(int)  { return 2048; }
 // ~3.9 V across the divider: a healthy cell, so the render is not a
 // permanent low-battery warning.
@@ -38,6 +41,7 @@ inline void attachInterrupt(int, void (*)(), int) {}
 inline int  digitalPinToInterrupt(int p) { return p; }
 #define RISING  1
 #define FALLING 2
+#define CHANGE  3
 inline void delay(uint32_t ms) { g_millis += ms; }
 inline void yield() {}
 

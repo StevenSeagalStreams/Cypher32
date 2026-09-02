@@ -19,6 +19,10 @@ uint32_t   g_millis   = 100000;
 uint32_t   g_rngState = 7;
 SerialStub Serial;
 ESPStub    ESP;
+// All high: nothing pressed. Designated-range initialisers are a GNU
+// extension the Arduino toolchain does not promise, so fill it explicitly.
+int g_pinLevel[64];
+static const bool g_pinInit = []{ for (int i = 0; i < 64; i++) g_pinLevel[i] = 1; return true; }();
 #include <WiFi.h>
 #include <ESPmDNS.h>
 #include <Preferences.h>
@@ -64,6 +68,15 @@ int main(int argc, char** argv) {
 
   const std::vector<Shot> shots = {
     {"idle",        []{ displayIdle(); }},
+    {"page-lastmsg",     []{ lastMsgFrom = 0xBEEF0001; lastMsgAt = g_millis - 58000;
+                             lastMsgText = "meet at the north gate in ten";
+                             lastSentTo = 0xBEEF0002; lastSentAt = g_millis - 2000;
+                             lastSentText = "on my way, watch the door";
+                             displayLastMsg(); }},
+    {"page-lastmsg-none", []{ lastMsgAt = 0; lastSentAt = 0;
+                              lastMsgText = ""; lastSentText = "";
+                              displayLastMsg(); }},
+    {"page-census",      []{ lastMsgAt = 0; displayCensus(); }},
     {"newnode",     []{ displayNewNode(0xBEEF0001, 9, 'W'); }},
     {"newnode-unknown", []{ displayNewNode(0xBEEF0002, 3, 'R'); }},
     {"hack-win",    []{ displayHackSuccess("beef0001", 45, "Clean in, clean out."); }},

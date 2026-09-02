@@ -68,6 +68,75 @@ uint32_t myChipID32 = makeChipID();
 #define ARM_WINDOW_MS    6000UL   // a boot shorter than this counts as an RST tap
 #define ARM_TIMEOUT_MS  20000UL   // armed state lapses if PRG isn't held
 
+// ── PRG short press: page flipping ───────────
+//
+//  The same button, doing a second job. A press RELEASED under
+//  PRG_SHORT_MAX_MS flips the screen to the next page; anything longer does
+//  what it always did, which — unless the wipe is armed — is nothing at all.
+//  There is 900 ms of clear air between this threshold and the 1500 ms point
+//  where a real reset hold first draws its warning, so the two gestures cannot
+//  be confused even with a slow hand.
+//
+//  WHY AN INTERRUPT AND NOT A POLL. An e-ink refresh blocks loop() for about
+//  two seconds: display.update() busy-waits on the panel's BUSY line, and
+//  yield() there only reschedules same-or-higher-priority tasks. A press that
+//  begins AND ends inside that window is not delayed, it is never seen — and
+//  this is a button whose whole job is to cause that window, so the dead time
+//  lands exactly where the next press does. Polling would drop most of them.
+//  The ISR runs regardless (the refresh does not mask interrupts), so the edge
+//  and its timestamp survive. millis() is ARDUINO_ISR_ATTR in the ESP32 core
+//  and is safe to call from one; nothing else in the handler touches anything.
+#define PRG_DEBOUNCE_MS      25UL   // stable-level requirement, tactile switch
+#define PRG_SHORT_MAX_MS    600UL   // released under this = page flip
+#define PRG_BOOT_IGNORE_MS 2000UL   // see the DTR/RTS note below
+#define PRG_POLL_GAP_MS     250UL   // a hold that outlives a blackout is not a hold
+#define PAGE_COALESCE_MS    250UL   // mashed presses become one refresh
+#define PAGE_HOLD_MS      60000UL   // idle-return timeout, 0 = stay forever
+
+//  THE SERIAL-MONITOR HAZARD. The CP2102's DTR/RTS lines drive GPIO0 and
+//  CHIP_PU through a dual MOSFET — that is how esptool puts the board into
+//  download mode. Opening a serial monitor can therefore pull this pin low
+//  without anybody touching the button. That was harmless while a lone PRG
+//  low meant nothing; now that a short press does something, ignore the pin
+//  for the first PRG_BOOT_IGNORE_MS and require a clean press AND release.
+
+// Which of the three screens the player has selected. This is the panel's
+// resting state; event screens paint over it and revertIdleAtMs brings it
+// back. Nothing else may assume the panel is showing idle.
+enum DispPage { PAGE_IDLE = 0, PAGE_LASTMSG = 1, PAGE_CENSUS = 2, PAGE_COUNT = 3 };
+uint8_t  pageShown   = PAGE_IDLE;   // what is on the glass
+uint8_t  pageWanted  = PAGE_IDLE;   // where the presses have got to
+uint32_t pageDirtyAt = 0;           // when pageWanted last moved
+uint32_t pageHeldSince = 0;         // when the current page was drawn
+
+// Declared here rather than beside the reset service, because paintCurrentPage()
+// has to honour it and that lives in the display section, well above.
+bool     resetArmed   = false;
+uint32_t resetArmedAt = 0;
+
+// Set by the ISR, consumed by loop(). volatile because the two sides run on
+// different stacks; uint32_t writes are atomic on this core so no lock.
+volatile bool     prgLevelLow  = false;
+volatile uint32_t prgEdgeMs    = 0;
+volatile uint32_t prgEdgeSeq   = 0;
+volatile uint32_t prgPressMs   = 0;   // when the current press started
+volatile uint32_t prgShortSeq  = 0;   // bumped on a qualifying short press
+uint32_t          prgShortSeen = 0;   // last short press loop() acted on
+
+void IRAM_ATTR prgISR() {
+  uint32_t now = millis();
+  if (now < PRG_BOOT_IGNORE_MS) return;             // DTR/RTS settling
+  if (now - prgEdgeMs < PRG_DEBOUNCE_MS) return;    // bounce
+  prgEdgeMs = now;
+  bool low = (digitalRead(PRG_PIN) == LOW);
+  if (low == prgLevelLow) return;                   // not a real transition
+  prgLevelLow = low;
+  if (low) { prgPressMs = now; return; }            // press
+  // Release. A short press is only a page flip; anything longer is either a
+  // reset hold or a deliberate nothing, and both are handled by the poller.
+  if (prgPressMs && (now - prgPressMs) < PRG_SHORT_MAX_MS) prgShortSeq++;
+}
+
 #ifndef BLACK
   #define BLACK 0x0000
 #endif
@@ -160,6 +229,8 @@ void shiftMood(int delta, const char* why) {
 // are defined. The Arduino IDE generates these for you; nothing else does, so
 // writing them out is what lets the sketch be compiled by a plain compiler —
 // which is how test/render_eink.cpp checks it builds at all.
+void          paintCurrentPage();
+void          drawPageDots(int page);
 bool          batteryPresent();
 int           getBatteryPercent();
 unsigned long nowMs();
@@ -1320,6 +1391,7 @@ bool idleNeedsRefresh() {
 void displayIdle() {
   displayRefreshes++;
   display.clearMemory(); display.landscape(); drawHeader();
+  drawPageDots(PAGE_IDLE);   // page 1 has to show that pages 2 and 3 exist
   driftMood();
   // Large sprite fills most of the content zone
   if (cyMood >= 0) drawSprite(spr_idle1, SPR_IDLE1_W, SPR_IDLE1_H, FACE_Y);
@@ -1443,6 +1515,146 @@ void displayNewNode(uint32_t id, uint8_t lvl, char fac) {
   display.update();
 }
 
+// Three markers punched into the rule drawHeader() already draws at y=12, so
+// the page indicator costs no layout space at all — that strip is ink on every
+// page, and nothing else reaches x=224 (the sprite ends at 75, the bubble
+// starts at 82).
+void drawPageDots(int page) {
+  const int W = 5, PITCH = 9;
+  int x0 = DISP_W - MARGIN_X - (PAGE_COUNT - 1) * PITCH - W;
+  for (int i = 0; i < PAGE_COUNT; i++) {
+    int x = x0 + i * PITCH;
+    display.fillRect(x - 1, 10, W + 2, 5, WHITE);         // notch the rule
+    if (i == page) display.fillRect(x,     10, W,     5, BLACK);
+    else           display.fillRect(x + 1, 11, W - 2, 3, BLACK);
+  }
+}
+
+// Greedy wrap into fixed buffers. Deliberately not Arduino Strings: this runs
+// on the blocking display path, and buildStateJson() already had to learn what
+// String churn costs on this board.
+static int wrapInto(const char* src, int cols, char out[3][21]) {
+  int line = 0, col = 0;
+  out[0][0] = out[1][0] = out[2][0] = '\0';
+  for (const char* p = src; *p && line < 3; ) {
+    // measure the next word
+    const char* w = p; int wl = 0;
+    while (w[wl] && w[wl] != ' ') wl++;
+    if (wl > cols) wl = cols;                    // a word longer than a line
+    if (col && col + 1 + wl > cols) { out[line][col] = '\0'; line++; col = 0;
+                                      if (line >= 3) break; }
+    if (col) out[line][col++] = ' ';
+    for (int i = 0; i < wl && col < cols; i++) out[line][col++] = w[i];
+    out[line][col] = '\0';
+    p = w + wl;
+    while (*p == ' ') p++;
+  }
+  return line + (col > 0 ? 1 : 0);
+}
+
+static String agoStr(uint32_t at) {
+  if (!at) return "";
+  uint32_t s = (millis() - at) / 1000;
+  if (s < 5)    return "now";
+  if (s < 60)   return String(s) + "s ago";
+  if (s < 3600) return String(s / 60) + "m ago";
+  return String(s / 3600) + "h ago";
+}
+
+// Page 2 — the last thing anyone said to you, and the last thing you said.
+// The footer goes: XP and skill bars are not what this page is about, and the
+// 34 px they cost is the difference between three lines of message and two.
+void displayLastMsg() {
+  displayRefreshes++;
+  display.clearMemory(); display.landscape();
+  drawHeader();
+  drawPageDots(PAGE_LASTMSG);
+
+  if (!lastMsgAt && !lastSentAt) {
+    printCenter(46, "NO MESSAGES YET");
+    printCenter(62, "32 characters, over the air");
+    display.update();
+    return;
+  }
+
+  if (lastMsgAt) {
+    printAt(MARGIN_X, 16, "FROM " + nodeDisplayName(lastMsgFrom));
+    printRight(DISP_W - MARGIN_X, 16, agoStr(lastMsgAt));
+    drawSep(26);
+    char lines[3][21];
+    int n = wrapInto(lastMsgText.c_str(), 20, lines);
+    setTextSize(2);
+    for (int i = 0; i < n && i < 3; i++) printAt(MARGIN_X, 31 + i * 19, lines[i]);
+    setTextSize(1);
+  } else {
+    printCenter(40, "NOTHING RECEIVED YET");
+  }
+
+  if (lastSentAt) {
+    drawSep(88);
+    printAt(MARGIN_X, 92, "SENT  " + nodeDisplayName(lastSentTo));
+    printRight(DISP_W - MARGIN_X, 92, agoStr(lastSentAt));
+    String t = lastSentText;
+    if (t.length() > 40) t = t.substring(0, 40);
+    printAt(MARGIN_X, 102, t);
+  }
+  display.update();
+}
+
+// Page 3 — how the room breaks down. Gated exactly as buildStateJson() gates
+// it: a contact below RECON_T_FACTION counts as UNKNOWN, never as a guess,
+// even though their beacon told us the real letter. A census that leaked the
+// answer would be a free scouting tool and would undo the recon ladder.
+static const char CENSUS_KEY[4] = {'B', 'W', 'R', 'G'};
+
+// The counting rule, on its own so the test can call it rather than restate
+// it. A test that re-implements the gate proves only that it can re-implement
+// the gate — this one broke exactly that way before it was pulled out here.
+// Returns the total; fills out[0..4] as BLACK/WHITE/RED/GREEN/UNKNOWN.
+int censusCounts(int out[5]) {
+  for (int i = 0; i < 5; i++) out[i] = 0;
+  int mine = 4;
+  for (int k = 0; k < 4; k++) if (myFaction.charAt(0) == CENSUS_KEY[k]) mine = k;
+  out[mine]++;                                    // you are in your own census
+  for (int i = 0; i < knownCount; i++) {
+    KnownNode* n = &knownNodes[i];
+    int b = 4;
+    if (reconKnows(n, RECON_T_FACTION))
+      for (int k = 0; k < 4; k++) if (n->faction == CENSUS_KEY[k]) b = k;
+    out[b]++;
+  }
+  int total = 0; for (int i = 0; i < 5; i++) total += out[i];
+  return total;
+}
+
+void displayCensus() {
+  displayRefreshes++;
+  const char* LBL[5] = {"BLACK", "WHITE", "RED", "GREEN", "UNKNOWN"};
+  int cnt[5];
+  int total = censusCounts(cnt);
+  int mine = 4;
+  for (int k = 0; k < 4; k++) if (myFaction.charAt(0) == CENSUS_KEY[k]) mine = k;
+
+  display.clearMemory(); display.landscape();
+  drawHeader();
+  drawPageDots(PAGE_CENSUS);
+  printAt(MARGIN_X, 16, "FACTION CENSUS");
+  printRight(DISP_W - MARGIN_X, 16, "n=" + String(total));
+  drawSep(26);
+
+  const int TRACK_X = 58, TRACK_W = 170;
+  for (int i = 0; i < 5; i++) {
+    int y = 30 + i * 18;
+    if (i == mine) printAt(MARGIN_X, y + 1, ">");
+    printAt(MARGIN_X + 6, y + 1, LBL[i]);
+    display.drawRect(TRACK_X, y, TRACK_W, 9, BLACK);
+    int filled = total ? cnt[i] * (TRACK_W - 2) / total : 0;
+    if (filled > 0) display.fillRect(TRACK_X + 1, y + 1, filled, 7, BLACK);
+    printRight(DISP_W - MARGIN_X, y + 1, String(cnt[i]));
+  }
+  display.update();
+}
+
 // Shown after a double RST tap, so the armed state is never invisible.
 void displayArmed() {
   displayRefreshes++;
@@ -1488,6 +1700,74 @@ void displayQr(const String& ssid, const char* line1, const char* line2) {
 
 void displaySetup() {
   displayQr(WiFi.softAPSSID(), "No password.", "Then 192.168.4.1");
+}
+
+// Turn presses into at most one panel write.
+//
+// The ISR counts qualifying short presses; this advances the wanted page for
+// each one and then waits PAGE_COALESCE_MS before drawing. Somebody tapping
+// three times to get back to the avatar gets ONE refresh landing on the
+// avatar, instead of three chained refreshes and six seconds of a deaf radio.
+// The wait is also what makes a mashed button feel like a control rather than
+// a queue: the panel follows the finger, it does not replay it.
+void servicePageButton() {
+  uint32_t seq = prgShortSeq;                   // volatile, read once
+  while (prgShortSeen != seq) {
+    prgShortSeen++;
+    // Armed means the panel is showing FACTORY RESET ARMED, which has no
+    // repaint path of its own — painting a page over it would hide the armed
+    // state, and the player's next instinct is to hold the button. That wipes
+    // the device. A press while armed does nothing at all.
+    if (resetArmed) continue;
+    pageWanted  = (uint8_t)((pageWanted + 1) % PAGE_COUNT);
+    pageDirtyAt = millis();
+    revertIdleAtMs = 0;        // a press dismisses any transient, QR included
+  }
+
+  if (pageWanted != pageShown &&
+      (uint32_t)(millis() - pageDirtyAt) >= PAGE_COALESCE_MS) {
+    pageShown = pageWanted;
+    paintCurrentPage();
+    pageHeldSince = millis();
+  }
+
+  // Browsing pages are sticky, but not forever: page 1 is the only screen
+  // carrying XP, skills and mood, and a device left in a bag showing a bar
+  // chart is not what this thing is for.
+#if PAGE_HOLD_MS > 0
+  if (pageShown != PAGE_IDLE && pageHeldSince &&
+      (uint32_t)(millis() - pageHeldSince) > PAGE_HOLD_MS) {
+    pageShown = pageWanted = PAGE_IDLE;
+    pageHeldSince = 0;
+    paintCurrentPage();
+  }
+#endif
+}
+
+// The one place that decides what belongs on the glass at rest.
+//
+// Before this existed, four separate recovery paths each hardcoded
+// displayIdle() — the revert timer, the arm lapse, a cancelled wipe hold, and
+// the mood tick. Add pages and every one of them silently paints idle over the
+// page the player chose, leaving the variable saying CENSUS while the panel
+// says otherwise; the next press then appears to do nothing at all. They all
+// call this now, and the precedence is deliberate: a pending wipe outranks
+// everything, an unconfigured device must keep its join QR, and only then does
+// the player's page selection apply.
+void paintCurrentPage() {
+  if (resetArmed)                            { displayArmed(); return; }
+  if (myName == "" || myFaction == "NONE")   { displaySetup(); return; }
+  switch (pageShown) {
+    case PAGE_LASTMSG: displayLastMsg(); break;
+    case PAGE_CENSUS:  displayCensus();  break;
+    default:
+      displayIdle();
+      // displayIdle() never wrote this, so the suppressor's model of the panel
+      // was permanently one refresh behind. Fixing it here also stops the
+      // 10-minute mood tick spending a redraw it does not need.
+      lastIdleSig = idleSignature();
+      break;
+  }
 }
 
 // ─────────────────────────────────────────────
@@ -1994,6 +2274,7 @@ void handleApiAction() {
     if (txt.length() == 0)   { apiFail(400, "Empty message"); return; }
     if (loraActionPending()) { apiFail(429, "Another action in flight"); return; }
     strncpy(n->msg_sent, txt.c_str(), 32); n->msg_sent[32] = '\0';
+    lastSentTo = target; lastSentText = txt; lastSentAt = millis();
     logEvent(EV_MSG_OUT, target, 0);
     loraSendMsg(target, txt.c_str());
     server.send(200, "application/json", "{\"ok\":true}");
@@ -2114,8 +2395,6 @@ void wipeAndReboot() {
   ESP.restart();
 }
 
-bool     resetArmed        = false;
-uint32_t resetArmedAt      = 0;
 bool     bootCounterClosed = false;
 
 void initFactoryResetButton() {
@@ -2181,10 +2460,25 @@ void serviceFactoryResetButton() {
     resetArmed  = false;
     lastIdleSig = 0xFFFFFFFF;
     Serial.println("[FACTORY RESET] disarmed — PRG not held in time");
-    if (myName == "" || myFaction == "NONE") displaySetup();
-    else                                     displayIdle();
+    paintCurrentPage();
   }
 #endif
+
+  // A hold interrupted by a blackout is not a hold. heldSince was only ever
+  // compared against wall-clock elapsed, never against whether the button had
+  // been seen down the whole time — so two polls either side of a long gap
+  // could satisfy the five-second test between them. Event screens already
+  // chain (a message, then a verdict, then a level-up is three refreshes back
+  // to back), so this was reachable before pages existed; pages would have
+  // made it easy. Losing sight of the pin for a quarter second restarts the
+  // count, which costs a determined player nothing.
+  static uint32_t lastPoll = 0;
+  uint32_t nowPoll = millis();
+  if (heldSince && (uint32_t)(nowPoll - lastPoll) > PRG_POLL_GAP_MS) {
+    heldSince = 0; warned = false;
+    Serial.println("[FACTORY RESET] hold restarted — display blocked the poll");
+  }
+  lastPoll = nowPoll;
 
   if (combo) {
     if (heldSince == 0) { heldSince = millis(); warned = false; return; }
@@ -2199,7 +2493,7 @@ void serviceFactoryResetButton() {
   } else {
     if (heldSince != 0 && warned) {   // released before the deadline
       lastIdleSig = 0xFFFFFFFF;
-      displayIdle();
+      paintCurrentPage();
     }
     heldSince = 0;
   }
@@ -2279,9 +2573,11 @@ void setup() {
     loraSendBeacon();
   }
 
-  if      (resetArmed)                          displayArmed();
-  else if (myName == "" || myFaction == "NONE") displaySetup();
-  else                                          displayIdle();
+  pageShown = pageWanted = PAGE_IDLE;
+  paintCurrentPage();
+  // CHANGE, not FALLING: the release edge is what decides a short press, and
+  // the press edge is what times it.
+  attachInterrupt(digitalPinToInterrupt(PRG_PIN), prgISR, CHANGE);
 
 }
 
@@ -2309,8 +2605,10 @@ void loop() {
   if (revertIdleAtMs && (int32_t)(millis() - revertIdleAtMs) >= 0) {
     revertIdleAtMs = 0;
     lastIdleSig = 0xFFFFFFFF;   // panel is showing an event screen — force redraw
-    displayIdle();
+    paintCurrentPage();         // back to the page the player chose, not idle
   }
+
+  servicePageButton();
 
   // Show incoming message — only update display when something arrived
   if (pendingMsg.length() > 0) {
@@ -2381,7 +2679,9 @@ void loop() {
   if ((uint32_t)(millis() - lastMood) > 600000UL) {
     lastMood = millis();
     driftMood();
-    if (idleNeedsRefresh()) displayIdle();
+    // Only page 1 is the avatar's page. The mood keeps drifting either way —
+    // it is the repaint that has to wait until the player is looking at it.
+    if (pageShown == PAGE_IDLE && idleNeedsRefresh()) displayIdle();
   }
 
   // A recon probe that never gets an answer has to time out on its own clock,

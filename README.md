@@ -405,6 +405,24 @@ The e-ink screen only refreshes when something happens — a hack result, an inc
 
 The character notices when you're losing.
 
+**One button, three pages.** A short press on **PRG** side-scrolls the display:
+the avatar, then the last message anyone sent you, then the faction census.
+Press again and you are back at the avatar. Three markers in the header rule
+show where you are. Hold the button instead and nothing happens — the long
+hold is still the factory-reset confirm, and it is deliberately unreachable
+unless you armed it with a double **RST** tap first.
+
+<table>
+<tr>
+<td><img src="docs/img/eink-page-lastmsg.png" alt="Page 2: the last message received, in large type, with the last message sent along the bottom"></td>
+<td><img src="docs/img/eink-page-census.png" alt="Page 3: a faction census bar chart with BLACK, WHITE, RED, GREEN and UNKNOWN"></td>
+</tr>
+<tr>
+<td align="center"><sub><b>Page 2</b> — the last thing anyone said, and the last thing you said.</sub></td>
+<td align="center"><sub><b>Page 3</b> — the room. Anyone you have not scouted to round 4 counts as UNKNOWN, never as a guess.</sub></td>
+</tr>
+</table>
+
 <table>
 <tr>
 <td><img src="docs/img/eink-newnode-unknown.png" alt="NODE DETECTED, UNKNOWN-0002, DISTANT"></td>
@@ -471,7 +489,7 @@ cd test && make shots    # regenerate every image in docs/img
 |-------|--------------|
 | `lint` | Every ALL-CAPS constant in the sketch resolves to a `#define` |
 | `sketch` | **Compiles `cypher32.ino`** against host stubs in `test/stub/` |
-| `run` | Link layer (169 checks) and a two-node radio simulation over a lossy channel (31) |
+| `run` | Link layer (177 checks), a two-node radio simulation over a lossy channel (31), and the page button (32) |
 | `portal` | The real portal HTML against a DOM shim — render, the mini-game, the alert |
 | `layout` | The page in real Chromium at five phone sizes — nothing off-screen, nothing unreachable |
 | `qr` | The encoder against `python-qrcode`, then the result decoded by OpenCV |
