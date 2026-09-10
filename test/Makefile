@@ -13,7 +13,7 @@
 
 CXX      ?= g++
 CXXFLAGS := -std=c++17 -I stub -Wall -Wno-format
-BINS     := test_link test_twonode test_pages
+BINS     := test_link test_twonode test_mesh test_pages
 
 .PHONY: all run asan portal lint qr sketch shots clean
 all: lint sketch run portal qr
@@ -74,7 +74,10 @@ test_qr_mask: test_qr_mask.cpp ../cypher32_qr.h
 test_link: test_link.cpp ../cypher32_lora.h ../cypher32_packets.h ../cypher32_crypto.h
 	$(CXX) $(CXXFLAGS) -o $@ $<
 
-test_twonode: test_twonode.cpp ../cypher32_lora.h ../cypher32_packets.h ../cypher32_crypto.h
+test_twonode: test_twonode.cpp nodectx.h ../cypher32_lora.h ../cypher32_packets.h ../cypher32_crypto.h
+	$(CXX) $(CXXFLAGS) -o $@ $<
+
+test_mesh: test_mesh.cpp nodectx.h ../cypher32_lora.h ../cypher32_packets.h ../cypher32_crypto.h
 	$(CXX) $(CXXFLAGS) -o $@ $<
 
 # Includes the whole sketch, like render_eink, so it exercises the real button

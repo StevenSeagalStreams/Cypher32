@@ -3,7 +3,7 @@
 
 // T4.7 — the single source of truth for the version. Shown in the portal
 // Config tab and in /api/diag.
-#define FIRMWARE_VERSION "v69"
+#define FIRMWARE_VERSION "v70"
 
 // ─────────────────────────────────────────────
 //  CYPHER32 LORA PACKET PROTOCOL  — v67
@@ -38,6 +38,40 @@
 #define PKT_MSG         0x07  // text message (max 32 chars)
 #define PKT_ACK         0x08  // link-layer acknowledgement
 #define PKT_PING        0x09  // reliable no-op — round-trip test
+#define PKT_ECHO        0x0A  // broadcast: "here is who I can hear"
+#define PKT_MAIL        0x0B  // a message being carried on somebody's behalf
+
+// ── Reach beyond direct range ────────────────
+//  Two features, one idea: a device can tell you things about places your
+//  radio cannot hear, but it may never act on your behalf in those places.
+//
+//  ECHO is a periodic broadcast of the sender's own direct neighbours. You
+//  hear it from someone in range and learn who *they* can hear — two hops of
+//  visibility, and no further. It is NEVER forwarded, which is the whole
+//  safety argument: with nothing rebroadcast there is no flood, no TTL to get
+//  wrong, no duplicate-suppression window to size, and a routing loop is not
+//  merely unlikely but unconstructable.
+//
+//  Flooding was the obvious alternative and it is not affordable here. One
+//  beacon relayed once by each of twenty devices costs every device 51.5 ms x
+//  20 per beacon interval = 3.43% duty cycle. EU 868 g1 allows 1% and this
+//  firmware self-caps at 0.8%, so plain flooding is illegal at six devices and
+//  four times over budget at twenty. An echo costs one frame per node per
+//  ECHO_INTERVAL_MS regardless of how many nodes there are.
+//
+//  MAIL is the other half. An echo tells you which of your neighbours can
+//  reach someone you cannot, so a message can be handed to that neighbour and
+//  delivered when they are next in range of the recipient. Nothing is relayed
+//  in real time; the message waits in a pocket. The carrier is chosen, not
+//  broadcast to, so one message costs one frame per hop and never N.
+//
+//  What deliberately does NOT travel: hacks, recon, XP, intel, locks. An echo
+//  contact has no faction, no level and no stats, cannot be scouted, cannot be
+//  attacked, and is counted by nothing. The game's only proximity check is the
+//  fact that your radio heard them — see findNode() at the action handler —
+//  and extending presence without extending consequence is what keeps it.
+#define ECHO_MAX_PEERS   8          // neighbours named per echo frame
+#define MAIL_TEXT_MAX    32
 
 // ── Header flags ─────────────────────────────
 #define PKTFLAG_ACK_REQ 0x01  // sender wants an ACK for this seq
@@ -182,7 +216,44 @@ struct PktPing {
   PktHeader hdr;        // type=PKT_PING — payload-free reliable probe
 };
 
+// Both of these must live inside the pack(1) region: uint32_t after a uint8_t
+// would otherwise take a pad byte, and the wire layout is not ours alone to
+// choose. PktEcho is 44 bytes and PktMail 53, against the 60-byte pre-signature
+// cap enforced by enqueueTx().
+struct PktEcho {
+  PktHeader hdr;                    // type=PKT_ECHO, to_id=0
+  uint8_t   count;                  // how many of peers[] are populated
+  uint32_t  peers[ECHO_MAX_PEERS];  // chip IDs heard DIRECTLY by the sender
+};
+
+struct PktMail {
+  PktHeader hdr;                    // type=PKT_MAIL, to_id = who we hand it to
+  uint32_t  final_id;               // who it is ultimately for
+  uint32_t  origin_id;              // who wrote it — not always hdr.from_id
+  uint8_t   carried;                // 0 = straight from the author, 1 = relayed
+  char      text[MAIL_TEXT_MAX + 1];
+};
+
 #pragma pack(pop)
+
+// enqueueTx() refuses anything over 64 - SIG_LEN and returns false, which for a
+// reply means the frame is dropped and the peer reports NO RESPONSE — a bug
+// that looks exactly like being out of range. Catch it at compile time instead.
+// (SIG_LEN is 4, defined in cypher32_lora.h, which includes this header.)
+#define PKT_WIRE_MAX 60
+static_assert(sizeof(PktBeacon)     <= PKT_WIRE_MAX, "PktBeacon exceeds the frame cap");
+static_assert(sizeof(PktReconReply) <= PKT_WIRE_MAX, "PktReconReply exceeds the frame cap");
+static_assert(sizeof(PktHackReq)    <= PKT_WIRE_MAX, "PktHackReq exceeds the frame cap");
+static_assert(sizeof(PktHackReply)  <= PKT_WIRE_MAX, "PktHackReply exceeds the frame cap");
+static_assert(sizeof(PktHackResult) <= PKT_WIRE_MAX, "PktHackResult exceeds the frame cap");
+static_assert(sizeof(PktMsg)        <= PKT_WIRE_MAX, "PktMsg exceeds the frame cap");
+static_assert(sizeof(PktEcho)       <= PKT_WIRE_MAX, "PktEcho exceeds the frame cap");
+static_assert(sizeof(PktMail)       <= PKT_WIRE_MAX, "PktMail exceeds the frame cap");
+// And the packed layout must actually be packed — an alignment pad here is a
+// wire-format change that only shows up as garbage on the other device.
+static_assert(sizeof(PktHeader) == 11, "PktHeader must stay 11 bytes on the wire");
+static_assert(sizeof(PktEcho) == 11 + 1 + 4 * ECHO_MAX_PEERS, "PktEcho has padding in it");
+static_assert(sizeof(PktMail) == 11 + 4 + 4 + 1 + MAIL_TEXT_MAX + 1, "PktMail has padding in it");
 
 // ── Node presence (T2.3) ─────────────────────
 #define NODE_ACTIVE_MS   90000UL    // seen within 90 s → ACTIVE

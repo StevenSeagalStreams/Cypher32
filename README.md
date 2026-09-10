@@ -371,6 +371,8 @@ All traffic runs at **868 MHz — SF7 — BW 125 kHz — CR 4/5 — sync 0x12**.
 | `MSG` | unicast | Raw text, 32 chars |
 | `ACK` | unicast | Link-layer acknowledgement |
 | `PING` | unicast | Reliable no-op — round-trip probe |
+| `ECHO` | broadcast | A list of the sender's own direct neighbours |
+| `MAIL` | unicast | A message being carried on somebody else's behalf |
 
 All of it is defined in `cypher32_packets.h`.
 
@@ -391,6 +393,46 @@ spare radio injecting packets to award themselves XP.
 
 Airtime is metered against the EU 868 duty cycle limit and diagnostics live at
 `192.168.4.1/api/diag`.
+
+### Reaching past your own radio
+
+Two Cyphers that cannot hear each other can still know of each other, and can
+still exchange a message — without anything being relayed.
+
+<img src="docs/img/eink-page-census-echo.png" width="300" align="right" alt="The census page with a faction bar chart, and n=3 +3 echo on the title line showing three contacts known only by echo">
+
+**Echoes.** Every couple of minutes each device broadcasts a short list of the
+neighbours it can currently hear. You pick that up from someone in range and
+learn who *they* can hear: two hops of visibility, and no further, because an
+echo is never forwarded. Those contacts appear in their own **ECHOES** section
+on the radar, dashed and greyed, showing which of your neighbours bridges to
+them.
+
+An echo is a rumour, not a contact. You cannot scout it, cannot hack it, and it
+is counted by nothing — not the census, not the leaderboard, not your contacts
+total. It has no signal bars either, because the only signal strength anyone
+measured belongs to the device that relayed it; printing that would put "VERY
+CLOSE" on somebody a kilometre away. It has no codename either, unless you
+already own a backdoor on them: recon is still the only way anyone gets a name.
+
+**Courier mail.** You can write to an echo. The message is handed to the
+neighbour who can reach them and delivered when those two are next in range —
+it travels in somebody's pocket, not over the air. The portal shows what is
+waiting and what you are carrying for other people. A message is carried at
+most once, so it can never circle; undelivered mail expires after half an hour.
+
+Carrying somebody's mail is worth a line in your log and nothing else. There is
+no XP in it, deliberately: the moment relaying pays, the best move is to leave
+the device on a windowsill, and this is a game about walking around.
+
+The census page on the device says the same thing in one number: `n=3 +3 echo`
+counts the room, then how far past it your knowledge reaches. The echoes are
+never added to the census itself — only reported alongside it.
+
+**Why not a full mesh.** Rebroadcasting beacons would cost each device 3.43%
+duty cycle in a room of twenty, against a 1% EU legal limit — illegal at six
+devices. Echo costs one frame per device per two minutes no matter how many
+there are. The full arithmetic is in `ROADMAP.md`.
 
 ---
 

@@ -26,6 +26,15 @@ const STATE = {
   action: { state: "", label: "", tries: 0, pending: false },
   probe: { id: "beef0002", state: "ready" },
   stats: { won: 12, lost: 5, breached: 3, held: 9, met: 41, bestSeq: 10 },
+  // Two people past the edge of hearing, one of whom we already own. Without
+  // these the radar screenshot silently omits half of what the page now does.
+  echoes: [
+    { id: "cafe0007", name: "UNKNOWN-0007", pwned: false,
+      via: "VoidShell", viaId: "beef0001", reachable: true, ageMs: 51000 },
+    { id: "cafe0008", name: "GrimPulse", pwned: true,
+      via: "AshVector", viaId: "beef0005", reachable: true, ageMs: 88000 },
+  ],
+  mail: { pending: 1, carried: 2, delivered: 4, handedOff: 3, expired: 0 },
   nodes: [
     { id: "beef0001", name: "VoidShell", level: 9, faction: "W", avgRssi: -55,
       bars: 4, proximity: "VERY CLOSE", status: "ACTIVE", ageMs: 4200, recon: 1,

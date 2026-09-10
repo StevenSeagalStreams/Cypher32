@@ -309,6 +309,21 @@ verification — T0.4 and the field test protocol — not more code.**
 
 - Any hardware change — no external antenna, no different board, no added sensors.
 - Any change to the avatar sprites, moods, speech bubble, or e-ink layout.
-- Mesh routing / multi-hop. Direct range only.
+- **Mesh routing / multi-hop relay of game traffic. Direct range only.** This
+  stands, and the arithmetic is why: one beacon rebroadcast once by each of
+  twenty devices costs every device 51.5 ms x 20 per beacon interval = **3.43%
+  duty cycle**, against a 1% EU 868 g1 legal limit and this firmware's own 0.8%
+  cap. Flooding is illegal at six devices and four times over budget at twenty,
+  and the cost is O(N) per node whatever the topology — a sparse chain pays the
+  same as a crowded room. Relaying only unicast is no better (3.83% at twenty),
+  and a 2-hop round trip of 2.6 s already exceeds the 2.2 s reliable-send
+  deadline before an e-ink refresh is anywhere near it.
+
+  What ships instead is **ECHO and courier MAIL** (v70), which extend *reach*
+  without relaying anything: an echo is a periodic list of the sender's own
+  neighbours and is never forwarded, and mail is handed to one chosen carrier
+  and delivered in person. Nothing that moves XP, intel or a lock window
+  travels further than one hop, and it cannot: an echo is not a `KnownNode`,
+  so the action gate refuses it structurally rather than conditionally.
 - Cloud, accounts, internet, telemetry. The premise is no infrastructure; keep it.
 - Native mobile app. The captive portal *is* the app.

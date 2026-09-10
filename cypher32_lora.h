@@ -128,6 +128,8 @@ uint8_t   loraBootBurst       = 0;
 
 String    pendingMsg     = "";
 String    pendingMsgFrom = "";
+bool      pendingMsgRelayed = false;   // arrived by courier, not in person
+uint32_t  pendingCourierFor = 0;       // we just accepted mail for this node
 
 // ── the last thing anyone said ───────────────
 // pendingMsg is a doorbell: loop() consumes it, clears it, and the text then
@@ -144,6 +146,7 @@ String    pendingMsgFrom = "";
 uint32_t  lastMsgFrom  = 0;
 String    lastMsgText  = "";
 uint32_t  lastMsgAt    = 0;
+bool      lastMsgCarried = false;   // arrived as mail, in somebody's pocket
 uint32_t  lastSentTo   = 0;
 String    lastSentText = "";
 uint32_t  lastSentAt   = 0;
@@ -289,6 +292,8 @@ const char* pktTypeName(uint8_t t) {
     case PKT_MSG:         return "MSG";
     case PKT_ACK:         return "ACK";
     case PKT_PING:        return "PING";
+    case PKT_ECHO:        return "ECHO";
+    case PKT_MAIL:        return "MAIL";
     default:              return "UNKNOWN";
   }
 }
@@ -737,6 +742,256 @@ void loraSendPing(uint32_t target_id) {
   loraSendReliable(&pkt, sizeof(pkt), "PING");
 }
 
+// ─────────────────────────────────────────────
+//  ECHO — presence one hop past the edge of hearing
+// ─────────────────────────────────────────────
+//  What an echo is: a neighbour told us it can hear this device. That is the
+//  entire content. No level, no faction, no stats, no signal — a relayed RSSI
+//  would be the relay's distance, not ours, and reporting it as the origin's
+//  would put "VERY CLOSE" on somebody two kilometres away and sort them above
+//  the person standing in front of you.
+//
+//  Echoes live here and not in knownNodes[] on purpose. Every rule in the game
+//  that means "near me" is written as findNode() returning non-null — the hack
+//  gate, recon, the census, the leaderboard, statMet, the discovery chime,
+//  backdoor refresh. Adding a hops field to KnownNode would leave one boolean
+//  between all of that and a player farming XP off someone they have never
+//  met, and every one of those call sites would need its own check. A separate
+//  table makes it unconstructable instead of merely forbidden.
+#define ECHO_MAX_NODES     12
+#define ECHO_TTL_MS        360000UL   // second-hand news goes stale faster
+#define ECHO_INTERVAL_MS   120000UL   // one frame per node per two minutes
+#define ECHO_JITTER_MS     20000UL
+
+struct EchoNode {
+  uint32_t chip_id;      // who
+  uint32_t via;          // which of OUR direct neighbours can hear them
+  uint32_t heard_ms;     // when that neighbour last told us so
+};
+EchoNode echoNodes[ECHO_MAX_NODES];
+int      echoCount = 0;
+uint32_t loraNextEchoMs = 0;
+int      loraEchoesSent = 0;
+int      loraEchoesRecv = 0;
+
+EchoNode* findEcho(uint32_t chip_id) {
+  for (int i = 0; i < echoCount; i++)
+    if (echoNodes[i].chip_id == chip_id) return &echoNodes[i];
+  return nullptr;
+}
+
+// Record "via can hear chip_id". Silently ignores anyone we can hear ourselves
+// — a direct contact is never downgraded to a rumour — and ourselves.
+void echoRecord(uint32_t chip_id, uint32_t via) {
+  if (chip_id == 0 || chip_id == myChipID32 || chip_id == via) return;
+  if (findNode(chip_id)) return;              // we hear them directly; not news
+  EchoNode* e = findEcho(chip_id);
+  if (!e) {
+    if (echoCount >= ECHO_MAX_NODES) {
+      int oldest = 0;
+      uint32_t now = millis();
+      for (int i = 1; i < echoCount; i++)
+        if ((uint32_t)(now - echoNodes[i].heard_ms) >
+            (uint32_t)(now - echoNodes[oldest].heard_ms)) oldest = i;
+      e = &echoNodes[oldest];
+    } else {
+      e = &echoNodes[echoCount++];
+    }
+    e->chip_id = chip_id;
+  }
+  e->via = via;
+  e->heard_ms = millis();
+}
+
+void pruneEchoes() {
+  for (int i = 0; i < echoCount; ) {
+    // Drop it once it is stale, and also the moment we can hear them for
+    // ourselves — at that point the rumour is not just redundant, it is a
+    // worse copy of something true.
+    if ((uint32_t)(millis() - echoNodes[i].heard_ms) >= ECHO_TTL_MS ||
+        findNode(echoNodes[i].chip_id)) {
+      for (int j = i; j < echoCount - 1; j++) echoNodes[j] = echoNodes[j + 1];
+      echoCount--;
+    } else i++;
+  }
+}
+
+// Which of our direct neighbours claims it can reach `target`, if any? This is
+// the entire routing table: one hop, chosen, never broadcast.
+uint32_t echoCarrierFor(uint32_t target) {
+  EchoNode* e = findEcho(target);
+  if (!e) return 0;
+  KnownNode* via = findNode(e->via);
+  if (!via || !nodeIsActive(via)) return 0;   // the bridge walked away
+  return e->via;
+}
+
+void loraSendEcho() {
+  if (!loraReady || knownCount == 0) return;
+  PktEcho pkt;
+  fillHdr(&pkt.hdr, PKT_ECHO, 0);
+  memset(pkt.peers, 0, sizeof(pkt.peers));
+  uint8_t n = 0;
+  // Only nodes we can hear right now. A fading contact is not a bridge, and
+  // announcing one would send mail to a carrier that cannot deliver it.
+  for (int i = 0; i < knownCount && n < ECHO_MAX_PEERS; i++)
+    if (nodeIsActive(&knownNodes[i])) pkt.peers[n++] = knownNodes[i].chip_id;
+  if (n == 0) return;
+  pkt.count = n;
+  if (loraSendUnreliable(&pkt, sizeof(pkt), /*urgent=*/false)) loraEchoesSent++;
+}
+
+static void serviceEcho() {
+  if (!loraBeaconEnabled || !loraReady) return;
+  if (loraNextEchoMs == 0) { loraNextEchoMs = millis() + ECHO_INTERVAL_MS; return; }
+  if ((int32_t)(millis() - loraNextEchoMs) < 0) return;
+  loraSendEcho();
+  loraNextEchoMs = millis() + ECHO_INTERVAL_MS + random(0, ECHO_JITTER_MS);
+}
+
+// ─────────────────────────────────────────────
+//  MAIL — a message that travels in somebody's pocket
+// ─────────────────────────────────────────────
+//  Not a relay. Nothing is forwarded in real time and nothing is flooded: a
+//  message waits in the outbox until either the recipient is in direct range,
+//  or a neighbour that an echo says CAN reach them is in direct range. Then it
+//  goes to exactly one device.
+//
+//  So the transport is the player walking somewhere, which is the one routing
+//  protocol this game can afford — and the only one that makes the mesh a
+//  reason to move rather than a reason to sit still.
+#define MAIL_SLOTS        8
+#define MAIL_TTL_MS       1800000UL   // half an hour, then it never arrives
+#define MAIL_RETRY_MS     15000UL     // how often one item may try again
+#define MAIL_MAX_TRIES    12
+
+struct MailItem {
+  uint32_t final_id;     // who it is for
+  uint32_t origin_id;    // who wrote it
+  char     text[MAIL_TEXT_MAX + 1];
+  uint32_t createdAt;
+  uint32_t lastTryAt;
+  uint8_t  tries;
+  uint8_t  seq;          // seq of the frame in flight, for ACK matching
+  bool     awaitingAck;
+  bool     carried;      // we are couriering this for somebody else
+  bool     active;
+};
+MailItem mailbox[MAIL_SLOTS];
+int      loraMailQueued    = 0;
+int      loraMailDelivered = 0;
+int      loraMailHandedOff = 0;
+int      loraMailExpired   = 0;
+int      loraMailDropped   = 0;
+
+int mailPending() {
+  int n = 0;
+  for (int i = 0; i < MAIL_SLOTS; i++) if (mailbox[i].active) n++;
+  return n;
+}
+int mailCarriedCount() {
+  int n = 0;
+  for (int i = 0; i < MAIL_SLOTS; i++)
+    if (mailbox[i].active && mailbox[i].carried) n++;
+  return n;
+}
+
+// Returns false when the outbox is full, so the caller can say so rather than
+// accepting a message that silently goes nowhere.
+bool mailQueue(uint32_t final_id, uint32_t origin_id, const char* text, bool carried) {
+  if (final_id == 0 || final_id == myChipID32) return false;
+  for (int i = 0; i < MAIL_SLOTS; i++) {
+    MailItem& m = mailbox[i];
+    // Same author, same recipient, same words: a duplicate handed to us twice
+    // by two carriers is one message, not two.
+    if (m.active && m.final_id == final_id && m.origin_id == origin_id &&
+        strncmp(m.text, text, MAIL_TEXT_MAX) == 0) return true;
+  }
+  for (int i = 0; i < MAIL_SLOTS; i++) {
+    MailItem& m = mailbox[i];
+    if (m.active) continue;
+    memset(&m, 0, sizeof(m));
+    m.final_id = final_id; m.origin_id = origin_id;
+    strncpy(m.text, text, MAIL_TEXT_MAX); m.text[MAIL_TEXT_MAX] = '\0';
+    m.createdAt = millis();
+    m.lastTryAt = millis() - MAIL_RETRY_MS;   // eligible immediately
+    m.carried = carried; m.active = true;
+    loraMailQueued++;
+    return true;
+  }
+  loraMailDropped++;
+  return false;
+}
+
+// Someone's mail reached its addressee, or we handed it on. Either way it
+// stops being our problem.
+static void mailClear(MailItem& m, bool handedOff) {
+  if (!m.active) return;
+  if (handedOff) loraMailHandedOff++; else loraMailDelivered++;
+  m.active = false; m.awaitingAck = false;
+}
+
+// A mail frame we sent has been acknowledged by whoever we sent it to.
+static bool mailAckMatch(uint32_t from, uint8_t seq) {
+  for (int i = 0; i < MAIL_SLOTS; i++) {
+    MailItem& m = mailbox[i];
+    if (!m.active || !m.awaitingAck || m.seq != seq) continue;
+    bool direct = (from == m.final_id);
+    if (!direct && from != echoCarrierFor(m.final_id)) continue;
+    LORA_LOG("MAIL %s by %08lx: \"%s\"", direct ? "delivered" : "handed to",
+             (unsigned long)from, m.text);
+    mailClear(m, !direct);
+    return true;
+  }
+  return false;
+}
+
+static void serviceMail() {
+  if (!loraReady) return;
+  for (int i = 0; i < MAIL_SLOTS; i++) {
+    MailItem& m = mailbox[i];
+    if (!m.active) continue;
+    if ((uint32_t)(millis() - m.createdAt) >= MAIL_TTL_MS ||
+        m.tries >= MAIL_MAX_TRIES) {
+      LORA_LOG("MAIL expired for %08lx", (unsigned long)m.final_id);
+      m.active = false; loraMailExpired++;
+      continue;
+    }
+    if ((uint32_t)(millis() - m.lastTryAt) < MAIL_RETRY_MS) continue;
+
+    // Prefer the recipient in person; fall back to a neighbour who says they
+    // can reach them. A message we are already carrying is never handed on a
+    // second time — two hops is the whole budget, and without that rule a
+    // message could circulate between two carriers indefinitely.
+    uint32_t hop = 0; bool direct = false;
+    KnownNode* dest = findNode(m.final_id);
+    if (dest && nodeIsActive(dest)) { hop = m.final_id; direct = true; }
+    else if (!m.carried)            { hop = echoCarrierFor(m.final_id); }
+    if (hop == 0) continue;                       // nobody to give it to yet
+
+    if (dutyBudgetExceeded()) continue;           // it can wait; it always could
+
+    PktMail pkt;
+    fillHdr(&pkt.hdr, PKT_MAIL, hop);
+    pkt.final_id  = m.final_id;
+    pkt.origin_id = m.origin_id;
+    pkt.carried   = m.carried ? 1 : 0;
+    strncpy(pkt.text, m.text, MAIL_TEXT_MAX); pkt.text[MAIL_TEXT_MAX] = '\0';
+    pkt.hdr.seq   = txSeq++;
+    pkt.hdr.flags = PKTFLAG_ACK_REQ;   // the ACK is the delivery receipt
+
+    m.seq = pkt.hdr.seq;
+    m.lastTryAt = millis();
+    m.tries++;
+    m.awaitingAck = enqueueTx(&pkt, sizeof(pkt), 0, /*urgent=*/false);
+    LORA_LOG("MAIL %s to %08lx for %08lx (try %u)",
+             direct ? "direct" : "via carrier", (unsigned long)hop,
+             (unsigned long)m.final_id, m.tries);
+    return;                            // one mail frame per pass, deliberately
+  }
+}
+
+
 // Replies are queued with a short delay so the requester has finished
 // re-arming RX before the answer lands (T1.3 — fixes D3).
 //
@@ -814,13 +1069,26 @@ void loraHandlePacket(uint8_t* buf, int len) {
   if (hdr->flags & PKTFLAG_IS_ACK) {
     loraAcksRecv++;
     PktHeader* a = hdr;
+    // The reliable slots get first refusal. txSeq is one counter shared by
+    // every frame we send, so a mail frame and a player action to the same peer
+    // can collide on a seq once it wraps — and if mail claimed the ACK first,
+    // the action the player is actually watching would sit there and time out.
+    // Mail can afford to be wrong about a receipt; it retries from the outbox
+    // fifteen seconds later. The hack in front of them cannot.
+    bool claimed = false;
     for (PendingTx* s : { &pendingUser, &pendingReply }) {
       if (s->active && s->to_id == a->from_id && s->seq == a->seq) {
         LORA_LOG("ACK matched seq=%u — %s delivered", a->seq, pktTypeName(s->type));
         clearSlot(*s, true);
+        claimed = true;
         break;
       }
     }
+    // Mail carries no retry slot — the outbox is its retry mechanism, on a
+    // timescale that suits something waiting for a person to walk somewhere.
+    // So the ACK is the delivery receipt, and matching it is what takes the
+    // message out of the bag.
+    if (!claimed) mailAckMatch(a->from_id, a->seq);
     return;
   }
 
@@ -985,6 +1253,7 @@ void loraHandlePacket(uint8_t* buf, int len) {
         lastMsgFrom = p->hdr.from_id;
         lastMsgText = String(p->text);
         lastMsgAt   = millis();
+        lastMsgCarried = false;
         reconAtLeast(n, RECON_T_NAME);   // they signed the message by sending it
         pendingMsg = String(p->text); pendingMsgFrom = chipIdStr(p->hdr.from_id);
       }
@@ -993,6 +1262,68 @@ void loraHandlePacket(uint8_t* buf, int len) {
     case PKT_PING:
       touchNode(hdr->from_id);
       break;   // the ACK above is the entire point of a ping
+
+    case PKT_ECHO: {
+      if (len < (int)sizeof(PktEcho)) return;
+      PktEcho* p = (PktEcho*)buf;
+      // The SENDER is a direct contact — we just heard their radio — so they
+      // get the full touchNode treatment including RSSI. The devices they name
+      // get none of it. That asymmetry is the whole point of the packet.
+      touchNode(p->hdr.from_id);
+      loraEchoesRecv++;
+      uint8_t n = p->count > ECHO_MAX_PEERS ? ECHO_MAX_PEERS : p->count;
+      for (uint8_t i = 0; i < n; i++)
+        echoRecord(p->peers[i], p->hdr.from_id);
+      LORA_LOG("ECHO from %08lx naming %u peer(s)",
+               (unsigned long)p->hdr.from_id, n);
+      break;
+    }
+
+    case PKT_MAIL: {
+      if (len < (int)sizeof(PktMail)) return;
+      PktMail* p = (PktMail*)buf;
+      touchNode(p->hdr.from_id);
+      char body[MAIL_TEXT_MAX + 1];
+      strncpy(body, p->text, MAIL_TEXT_MAX); body[MAIL_TEXT_MAX] = '\0';
+
+      if (p->final_id == myChipID32) {
+        // It arrived. Credit the author, not whoever happened to carry it —
+        // the courier did not write it and must not be answered as if they had.
+        KnownNode* n = findNode(p->origin_id);
+        if (n) {
+          strncpy(n->msg_inbox, body, MAIL_TEXT_MAX); n->msg_inbox[MAIL_TEXT_MAX] = '\0';
+          n->msg_unread = true;
+          reconAtLeast(n, RECON_T_NAME);   // they signed it by writing it
+        }
+        lastMsgFrom = p->origin_id;
+        lastMsgText = String(body);
+        lastMsgAt   = millis();
+        lastMsgCarried = (p->hdr.from_id != p->origin_id);
+        pendingMsg     = String(body);
+        pendingMsgFrom = chipIdStr(p->origin_id);
+        pendingMsgRelayed = (p->hdr.from_id != p->origin_id);
+        LORA_LOG("MAIL arrived from %08lx%s",
+                 (unsigned long)p->origin_id,
+                 pendingMsgRelayed ? " (carried)" : "");
+        break;
+      }
+
+      // It is for somebody else, so we are being asked to carry it. Only ever
+      // one hop: a message already carried once is refused, which is what stops
+      // two couriers passing the same message back and forth forever.
+      if (p->carried) { LORA_LOG("MAIL refused — already carried once"); break; }
+      if (mailCarriedCount() >= MAIL_SLOTS / 2) {
+        LORA_LOG("MAIL refused — courier bag full");
+        break;                        // never let other people's post crowd out our own
+      }
+      if (mailQueue(p->final_id, p->origin_id, body, /*carried=*/true)) {
+        pendingCourierFor = p->final_id;
+        LORA_LOG("MAIL accepted for carriage to %08lx",
+                 (unsigned long)p->final_id);
+      }
+      break;
+    }
+
     default: break;
   }
 }
@@ -1140,6 +1471,7 @@ static void serviceNodePrune() {
   if (!elapsed(lastPrune, NODE_PRUNE_MS)) return;
   lastPrune = millis();
   pruneNodes();
+  pruneEchoes();     // must follow pruneNodes: an echo dies when we hear them
 }
 
 // Retry / expire one reliable slot (T1.2).
@@ -1226,6 +1558,8 @@ void loraTick() {
 
   servicePendingTx();
   serviceBeacon();
+  serviceEcho();
+  serviceMail();
   serviceTxQueue();
   serviceRxWatchdog();
   serviceNodePrune();
@@ -1324,6 +1658,14 @@ String loraDiagJson() {
   j += "\"action\":\""      + String(loraActionText()) + "\",";
   j += "\"actionLabel\":\"" + loraActionLabel + "\",";
   j += "\"actionTries\":"   + String(loraActionTries) + ",";
+  j += "\"echoNodes\":"     + String(echoCount) + ",";
+  j += "\"echoesSent\":"    + String(loraEchoesSent) + ",";
+  j += "\"echoesRecv\":"    + String(loraEchoesRecv) + ",";
+  j += "\"mailPending\":"   + String(mailPending()) + ",";
+  j += "\"mailCarried\":"   + String(mailCarriedCount()) + ",";
+  j += "\"mailDelivered\":" + String(loraMailDelivered) + ",";
+  j += "\"mailHandedOff\":" + String(loraMailHandedOff) + ",";
+  j += "\"mailExpired\":"   + String(loraMailExpired) + ",";
   j += "\"nodes\":"         + String(knownCount) + ",";
   j += "\"uptimeMs\":"      + String(millis());
   j += "}";

@@ -382,7 +382,7 @@ void requestRestart(uint32_t inMs) { restartPending = true; restartAtMs = millis
 #define EVENT_LOG_SIZE 20
 enum EvType { EV_DISCOVER, EV_SCOUTED, EV_RECON, EV_HACK_WON, EV_HACK_LOST,
               EV_BREACHED, EV_HELD, EV_MSG_IN, EV_MSG_OUT, EV_LEVEL, EV_TRAIN,
-              EV_PWNED };
+              EV_PWNED, EV_MAIL_OUT, EV_MAIL_IN, EV_COURIER, EV_ECHO };
 struct GameEvent {
   uint8_t       type;
   uint32_t      peer;      // 0 when there is no other party
@@ -414,6 +414,10 @@ const char* evName(uint8_t t) {
     case EV_LEVEL:     return "levelled up";
     case EV_TRAIN:     return "training";
     case EV_PWNED:     return "backdoored";
+    case EV_MAIL_OUT:  return "mail queued for";
+    case EV_MAIL_IN:   return "mail carried from";
+    case EV_COURIER:   return "carrying mail for";
+    case EV_ECHO:      return "echo of";
   }
   return "?";
 }
@@ -752,6 +756,23 @@ String nodeDisplayName(uint32_t id) {
   if (n && !reconKnows(n, RECON_T_NAME))
     return "UNKNOWN-" + chipIdStr(id).substring(4);
   return nodeNameFromId(id);
+}
+
+// The same question for a node that is NOT in the table, which is every echo
+// by definition. nodeDisplayName() falls through to the real codename when
+// findNode() misses — fine for the event log, where the name was earned before
+// the row aged out, but wrong here: an echo would hand out a free codename for
+// everyone within two hops, and "recon is how anyone gets a name at all" is
+// the rule the whole intel ladder rests on.
+//
+// A backdoor is the one form of earned intel that survives the node record, so
+// it is the one thing that can still name an echo.
+bool haveBackdoorOn(uint32_t id) {
+  return pwnedList.indexOf(chipIdStr(id) + ":") != -1;
+}
+String echoDisplayName(uint32_t id) {
+  if (haveBackdoorOn(id)) return nodeNameFromId(id);
+  return "UNKNOWN-" + chipIdStr(id).substring(4);
 }
 
 // ─────────────────────────────────────────────
@@ -1587,12 +1608,15 @@ void displayLastMsg() {
   if (!lastMsgAt && !lastSentAt) {
     printCenter(46, "NO MESSAGES YET");
     printCenter(62, "32 characters, over the air");
+    int bag = mailPending();
+    if (bag) printCenter(78, String(bag) + " waiting to be delivered");
     panelUpdate();
     return;
   }
 
   if (lastMsgAt) {
-    printAt(MARGIN_X, 16, "FROM " + nodeDisplayName(lastMsgFrom));
+    printAt(MARGIN_X, 16, String(lastMsgCarried ? "MAIL " : "FROM ") +
+                          nodeDisplayName(lastMsgFrom));
     printRight(DISP_W - MARGIN_X, 16, agoStr(lastMsgAt));
     drawSep(26);
     char lines[3][21];
@@ -1653,7 +1677,12 @@ void displayCensus() {
   drawHeader();
   drawPageDots(PAGE_CENSUS);
   printAt(MARGIN_X, 16, "FACTION CENSUS");
-  printRight(DISP_W - MARGIN_X, 16, "n=" + String(total));
+  // The census counts the room. Echoes are not in it and must not be added to
+  // it — but saying how many there are is the one honest way to show that the
+  // network reaches further than the count does.
+  printRight(DISP_W - MARGIN_X, 16,
+             "n=" + String(total) +
+             (echoCount ? " +" + String(echoCount) + " echo" : ""));
   drawSep(26);
 
   const int TRACK_X = 58, TRACK_W = 170;
@@ -1860,7 +1889,8 @@ String buildStateJson() {
   // every 2 seconds, on a server that blocks the radio while it runs. One
   // reserve() up front turns that back into a linear append.
   String j;
-  j.reserve(768 + (size_t)knownCount * 512 + (size_t)eventCount * 96);
+  j.reserve(768 + (size_t)knownCount * 512 + (size_t)eventCount * 96 +
+           (size_t)echoCount * 128);
   j += "{";
   j += "\"configured\":" + String(configured ? "true" : "false") + ",";
   j += "\"name\":\""     + jesc(myName) + "\",";
@@ -1997,7 +2027,32 @@ String buildStateJson() {
     j += "\"xp\":"      + String(e.xp) + ",";
     j += "\"ageMs\":"   + String(ageMs(e.at)) + "}";
   }
-  j += "]}";
+  j += "],";
+
+  // Echoes ride alongside the node list, never inside it. The portal draws
+  // them in their own section for the same reason the firmware keeps them in
+  // their own table: an echo that appears among the contacts is one careless
+  // sort away from looking like somebody you can attack.
+  j += "\"echoes\":[";
+  for (int i = 0; i < echoCount; i++) {
+    EchoNode& e = echoNodes[i];
+    if (i) j += ",";
+    j += "{\"id\":\""   + chipIdStr(e.chip_id) + "\",";
+    j += "\"name\":\""  + jesc(echoDisplayName(e.chip_id)) + "\",";
+    j += "\"pwned\":"    + String(haveBackdoorOn(e.chip_id) ? "true" : "false") + ",";
+    j += "\"via\":\""   + jesc(nodeDisplayName(e.via)) + "\",";
+    j += "\"viaId\":\"" + chipIdStr(e.via) + "\",";
+    j += "\"reachable\":" + String(echoCarrierFor(e.chip_id) ? "true" : "false") + ",";
+    j += "\"ageMs\":"    + String(ageMs(e.heard_ms)) + "}";
+  }
+  j += "],";
+
+  j += "\"mail\":{\"pending\":" + String(mailPending()) +
+       ",\"carried\":"           + String(mailCarriedCount()) +
+       ",\"delivered\":"         + String(loraMailDelivered) +
+       ",\"handedOff\":"         + String(loraMailHandedOff) +
+       ",\"expired\":"           + String(loraMailExpired) + "}";
+  j += "}";
   return j;
 }
 
@@ -2228,6 +2283,30 @@ void handleApiAction() {
   // ── radio actions: fire and let the poll report the outcome (T3.5) ──
   if (!loraReady) { apiFail(503, "Radio offline"); return; }
   if (target == 0) { apiFail(400, "Bad target"); return; }
+  // Mail is deliberately handled before the in-range gate below. Every other
+  // action requires findNode() to succeed, which is the game's only proximity
+  // check; a message that waits in a pocket for its recipient is the one thing
+  // that is allowed to be addressed to somebody out of earshot.
+  if (a == "mail") {
+    String txt = server.arg("txt");
+    if (txt.length() == 0) { apiFail(400, "Empty message"); return; }
+    if (txt.length() > MAIL_TEXT_MAX) txt = txt.substring(0, MAIL_TEXT_MAX);
+    KnownNode* direct = findNode(target);
+    uint32_t   via    = echoCarrierFor(target);
+    if (!direct && via == 0) {
+      apiFail(404, "Nobody in range can reach them"); return;
+    }
+    if (!mailQueue(target, myChipID32, txt.c_str(), /*carried=*/false)) {
+      apiFail(507, "Outbox full — wait for one to be delivered"); return;
+    }
+    logEvent(EV_MAIL_OUT, target, 0);
+    String how = direct ? String("Waiting for them to be in range")
+                        : String("Will travel via ") + nodeDisplayName(via);
+    server.send(200, "application/json",
+                "{\"ok\":true,\"msg\":\"" + jesc(how) + "\"}");
+    return;
+  }
+
   KnownNode* n = findNode(target);
   if (!n) { apiFail(404, "Node not in range"); return; }
   String nid0 = chipIdStr(target);
@@ -2640,17 +2719,32 @@ void loop() {
     String msg  = pendingMsg;
     String from = pendingMsgFrom;
     pendingMsg = ""; pendingMsgFrom = "";
-    logEvent(EV_MSG_IN, (uint32_t)strtoul(from.c_str(), nullptr, 16), 0);
+    logEvent(pendingMsgRelayed ? EV_MAIL_IN : EV_MSG_IN,
+             (uint32_t)strtoul(from.c_str(), nullptr, 16), 0);
+    bool carried = pendingMsgRelayed;
+    pendingMsgRelayed = false;
     Serial.printf("[MSG] from %s: \"%s\" (mood stays %d)\n",
                   from.c_str(), msg.c_str(), cyMood);
     displayIncomingMsg(from, msg);
     revertIdleAtMs = millis() + 5000;
+    if (carried) Serial.println("[MAIL] that one came the long way round");
   }
 
   // Someone new appeared, or someone scouted us. Drain both queues; the
   // discovery screen is paced naturally by revertIdleAtMs.
   uint32_t peer;
   while (loraPopScoutedBy(&peer)) logEvent(EV_SCOUTED, peer, 0);
+
+  // We took somebody's mail. Worth a line in the log — being useful to the
+  // network is a thing you did — but never a screen: it is not addressed to
+  // this player, and a full refresh for someone else's post would cost two
+  // seconds of deafness for nothing.
+  if (pendingCourierFor) {
+    logEvent(EV_COURIER, pendingCourierFor, 0);
+    Serial.printf("[MAIL] carrying a message for %08lx\n",
+                  (unsigned long)pendingCourierFor);
+    pendingCourierFor = 0;
+  }
   if (revertIdleAtMs == 0 && loraPopNewNode(&peer)) {
     logEvent(EV_DISCOVER, peer, 0);
     statMet++;
