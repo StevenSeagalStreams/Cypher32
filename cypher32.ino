@@ -326,7 +326,7 @@ String myFaction   = "NONE";
 
 // hackedList format: "id:uptimeMs,id:uptimeMs,"
 // Each entry stores the uptime-ms when the hack occurred.
-// We compare against current uptime to enforce the 7-day cooldown.
+// We compare against current uptime to enforce the 12-hour cooldown.
 // Note: millis() resets on reboot, so we persist a "boot epoch" offset
 // (bootEpoch) in preferences so timestamps survive reboots.
 String hackedList = "";
@@ -351,7 +351,7 @@ int statMet      = 0;   // distinct contacts ever discovered
 int statBestSeq  = 0;   // furthest recon sequence ever cleared
 String hackPendingId = "";   // target of the hack currently awaiting a verdict
 
-// 7 days in milliseconds
+// Half a day in milliseconds
 #define HALF_DAY_MS   43200000UL   // 12 hours
 // Owning a node used to hold it for a week, which on a 250x122 screen read as
 // "6d 23h" and made a target dead for a whole event. Both locks are the same
@@ -592,7 +592,7 @@ void loadProgress() {
 // table, so neither a power cycle nor a node being aged out of range can be
 // used to clear a cooldown.
 //
-//   hackedList — 7-day lock after a successful hack
+//   hackedList — 12-hour lock after a successful hack
 //   failList   — 12-hour retry cooldown after a failed one
 
 bool listHas(const String& list, const String& id, unsigned long window) {
@@ -727,6 +727,7 @@ void serviceReconResets() {
 
     n->hack_attempted = false;
     n->recon_count    = 0;
+    reconLedgerSet(n->chip_id, 0);   // the lock expiring is what refunds them
     // A perfect run left a backdoor open. Everything else fades: three fresh
     // attempts, and the dossier goes back to a signal with no name on it.
     if (n->pwned) {
@@ -1264,6 +1265,19 @@ void drawXPBar(int xp, int maxXP) {
 int curTextSize = 1;
 void setTextSize(int s) { curTextSize = s < 1 ? 1 : s; display.setTextSize(curTextSize); }
 
+// Every panel write goes through here rather than calling display.update()
+// directly, because the refresh is the point at which this device stops
+// servicing its radio for about two seconds. Anything already queued — an ACK,
+// a deferred reply, a hack verdict somebody is timing us on — goes out first.
+//
+// 300 ms is sized for the worst deferred reply: REPLY_DELAY_MIN_MS + jitter is
+// up to 120 ms, plus CAD and ~98 ms of airtime for the largest frame. It
+// returns immediately when the queue is empty, which is the common case.
+void panelUpdate() {
+  loraFlushTx(300);
+  display.update();
+}
+
 void printAt(int x, int y, String t) { display.setCursor(x, y); display.print(t); }
 
 void printRight(int rx, int y, String t) {
@@ -1398,7 +1412,7 @@ void displayIdle() {
   else             drawSprite(spr_idle2, SPR_IDLE2_W, SPR_IDLE2_H, FACE_Y);
   // Only bubble — no status text on idle screen
   drawBubble(getIdleBubble());
-  drawFooter(); display.update();
+  drawFooter(); panelUpdate();
 }
 
 void displayScanning() {
@@ -1406,7 +1420,7 @@ void displayScanning() {
   // Large focused sprite, one bubble line only
   drawSprite(spr_idle2, SPR_IDLE2_W, SPR_IDLE2_H, FACE_Y);
   drawBubble(getScanBubble());
-  drawFooter(); display.update();
+  drawFooter(); panelUpdate();
 }
 
 void displayTargetFound(String tid, int fw, int att, int pool) {
@@ -1415,14 +1429,14 @@ void displayTargetFound(String tid, int fw, int att, int pool) {
   { String nd="Node: "+tid; String od="P:"+String(pool)+" T:"+String(att);
   drawBubbleRight("TARGET LOCKED", nd.c_str(), od.c_str(),
                   cyMood>=0?"Let's crack it!":"Fine, lets go."); }
-  drawFooter(); display.update();
+  drawFooter(); panelUpdate();
 }
 
 void displayAttacking(String tid) {
   display.clearMemory(); display.landscape(); drawHeader();
   drawSprite(spr_idle2, SPR_IDLE2_W, SPR_IDLE2_H, FACE_Y);
   drawBubbleRight("BREACH ATTEMPT", "Breaking firewall...", "Go go go!");
-  drawFooter(); display.update();
+  drawFooter(); panelUpdate();
 }
 
 // NOTE: these draw the screen and nothing else. They used to call shiftMood()
@@ -1434,7 +1448,7 @@ void displayHackSuccess(String tid, int xp, String note) {
   drawSprite(spr_victory, SPR_VICTORY_W, SPR_VICTORY_H, FACE_Y);
   { String nd="Node "+tid+" owned."; String xs="XP +"+String(xp);
   drawBubbleRight("SYSTEM BREACHED", nd.c_str(), xs.c_str(), note.c_str()); }
-  drawFooter(); display.update();
+  drawFooter(); panelUpdate();
 }
 
 void displayHackFailed(String tid, int xp, String note) {
@@ -1442,14 +1456,14 @@ void displayHackFailed(String tid, int xp, String note) {
   drawSprite(spr_lost, SPR_LOST_W, SPR_LOST_H, FACE_Y);
   { String nd="Node "+tid+" held."; String xs="XP -"+String(xp);
   drawBubbleRight("COUNTER-HACKED", nd.c_str(), xs.c_str(), note.c_str()); }
-  drawFooter(); display.update();
+  drawFooter(); panelUpdate();
 }
 
 void displayImmune(String tid) {
   display.clearMemory(); display.landscape(); drawHeader();
   drawSprite(spr_bored, SPR_BORED_W, SPR_BORED_H, FACE_Y);
   drawBubbleRight("TARGET IMMUNE", "Faction block.", "Can't touch this.");
-  drawFooter(); display.update();
+  drawFooter(); panelUpdate();
 }
 
 void displayIncomingMsg(String fromId, String msg) {
@@ -1465,7 +1479,7 @@ void displayIncomingMsg(String fromId, String msg) {
     drawBubbleRight(nameStr.c_str(), line1.c_str(), line2.c_str());
   else
     drawBubbleRight(nameStr.c_str(), line1.c_str());
-  drawFooter(); display.update();
+  drawFooter(); panelUpdate();
 }
 
 void displayLevelUp() {
@@ -1479,7 +1493,7 @@ void displayLevelUp() {
                   "192.168.4.1 to upgrade",
                   cyMood>=4?"LETS GO!!!":"Yes!! LVL up!"); }
   drawSep(FOOTER_SEP_Y);
-  display.update();
+  panelUpdate();
 }
 
 // Shown while PRG is being held, so a factory reset is not silent.
@@ -1489,7 +1503,7 @@ void displayWiping() {
   printCenter(40, "FACTORY RESET");
   printCenter(56, "KEEP HOLDING TO WIPE");
   printCenter(72, "RELEASE TO CANCEL");
-  display.update();
+  panelUpdate();
 }
 
 // Discovery is the moment this game turns on for people, so it gets the whole
@@ -1512,7 +1526,7 @@ void displayNewNode(uint32_t id, uint8_t lvl, char fac) {
                  : String(n ? nodeProximity(n) : "IN RANGE");
   printCenter(72, sub);
   printCenter(92, "192.168.4.1 to scout");
-  display.update();
+  panelUpdate();
 }
 
 // Three markers punched into the rule drawHeader() already draws at y=12, so
@@ -1573,7 +1587,7 @@ void displayLastMsg() {
   if (!lastMsgAt && !lastSentAt) {
     printCenter(46, "NO MESSAGES YET");
     printCenter(62, "32 characters, over the air");
-    display.update();
+    panelUpdate();
     return;
   }
 
@@ -1598,7 +1612,7 @@ void displayLastMsg() {
     if (t.length() > 40) t = t.substring(0, 40);
     printAt(MARGIN_X, 102, t);
   }
-  display.update();
+  panelUpdate();
 }
 
 // Page 3 — how the room breaks down. Gated exactly as buildStateJson() gates
@@ -1652,7 +1666,7 @@ void displayCensus() {
     if (filled > 0) display.fillRect(TRACK_X + 1, y + 1, filled, 7, BLACK);
     printRight(DISP_W - MARGIN_X, y + 1, String(cnt[i]));
   }
-  display.update();
+  panelUpdate();
 }
 
 // Shown after a double RST tap, so the armed state is never invisible.
@@ -1662,7 +1676,7 @@ void displayArmed() {
   printCenter(34, "FACTORY RESET ARMED");
   printCenter(52, "HOLD PRG 5s TO WIPE");
   printCenter(70, "OR WAIT TO CANCEL");
-  display.update();
+  panelUpdate();
 }
 
 // The Wi-Fi join QR. E-ink is ideal for this: it costs nothing to leave on
@@ -1677,7 +1691,7 @@ void displayQr(const String& ssid, const char* line1, const char* line2) {
     printCenter(40, "JOIN WIFI");
     printCenter(58, ssid);
     printCenter(76, "then 192.168.4.1");
-    display.update();
+    panelUpdate();
     return;
   }
 
@@ -1695,7 +1709,7 @@ void displayQr(const String& ssid, const char* line1, const char* line2) {
   printAt(tx, 40, ssid);
   printAt(tx, 62, line1);
   printAt(tx, 76, line2);
-  display.update();
+  panelUpdate();
 }
 
 void displaySetup() {
@@ -2025,7 +2039,8 @@ void handleApiReveal() {
   if (!reconProbe.charged) {
     reconProbe.charged = true;
     if (training)                 trainRecon++;
-    else if (n && !n->pwned)      n->recon_count++;
+    else if (n && !n->pwned)    { n->recon_count++;
+                                  reconLedgerSet(id, n->recon_count); }
   }
 
   if (training) {
@@ -2257,11 +2272,11 @@ void handleApiAction() {
     if (hackInFlight)         { apiFail(429, "A hack is already running"); return; }
     // Refuse immune targets here. This used to be checked only when XP was
     // worked out, by which point the defender had already rolled and the node
-    // had been locked for 7 days for a hack worth nothing.
+    // had been locked for half a day for a hack worth nothing.
     if (!canAttackFaction(n->faction)) {
       apiFail(400, "WHITE can only attack BLACK and RED"); return;
     }
-    if (recentlyHacked(nid))  { apiFail(400, "Already owned — locked for 7 days"); return; }
+    if (recentlyHacked(nid))  { apiFail(400, "Already owned — locked for 12 hours"); return; }
     if (recentlyFailed(nid))  { apiFail(400, "Locked out — try again later"); return; }
     if (loraActionPending())  { apiFail(429, "Another action in flight"); return; }
     hackPendingId = nid;
@@ -2359,7 +2374,7 @@ void resolveHackVerdict() {
 
   bool lvlUp = false;
   if (effectiveWin) {
-    recordHack(nid);                       // 7-day lock
+    recordHack(nid);                       // 12-hour lock
     displayHackSuccess(nid, result.xpDelta, result.note);
     lvlUp = applyXP(result.xpDelta);
   } else {
@@ -2503,7 +2518,17 @@ void setup() {
   Serial.begin(115200);
   delay(100);
 
-  esp_task_wdt_deinit();
+  // The panel refresh busy-waits ~2 s and handleApiPing() spins up to 3.5 s;
+  // if both land in one pass that is 5.5 s against the default 5 s task
+  // watchdog, so we turn it off. It returns ESP_ERR_INVALID_STATE when a task
+  // is still subscribed, and an unchecked failure here is a reboot we would be
+  // hunting from the symptoms — say so on the console instead.
+  {
+    esp_err_t wdt = esp_task_wdt_deinit();
+    if (wdt != ESP_OK)
+      Serial.printf("[WDT] deinit failed (%d) — task watchdog still armed; "
+                    "a slow refresh may reboot the device\n", (int)wdt);
+  }
 
   // Allocate WebServer here — its constructor can crash if run at global init
   serverPtr = new WebServer(80);
@@ -2640,8 +2665,12 @@ void loop() {
     resolveHackVerdict();
   }
 
-  // ...or the target never answered. Say so rather than inventing a result.
-  if (hackTimedOut) {
+  // ...or the target never answered. Say so rather than inventing a result —
+  // but only once the grace window has closed too. The retries stopping is not
+  // the same event as the target being silent: a defender painting its own
+  // alert screen answers a couple of seconds late, and calling that a miss is
+  // what used to hand the attacker an uncharged re-roll.
+  if (hackTimedOut && (int32_t)(millis() - hackGraceUntil) >= 0) {
     hackTimedOut = false;
     shiftMood(-1, "hack got no answer");
     displayHackFailed(hackPendingId, 0, "No response. Out of range?");

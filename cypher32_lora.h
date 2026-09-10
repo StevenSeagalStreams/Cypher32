@@ -187,6 +187,21 @@ bool      hackVerdictWon      = false;
 uint8_t   hackVerdictFirewall = 0;
 char      hackVerdictFaction  = '?';
 bool      hackTimedOut        = false;   // target never answered
+// ...but "never" is a claim with a deadline on it, and ours was too short.
+//
+// The reliable slot gives up after TX_MAX_TRIES tries, 1.6-2.8 s. A defender
+// that is mid e-ink refresh answers later than that through no fault of
+// anyone's, and the verdict used to land on `if (hackInFlight ...)` — already
+// false — and be dropped without a word. resolveHackVerdict() never ran, so
+// recordFail() never ran, so no cooldown was recorded: the attacker could
+// re-hack at once, forever, and every attempt cost the defender an NVS write.
+// Free re-rolls plus attacker-driven flash wear on somebody else's device.
+//
+// So the slot timing out now only stops the *retries*. We keep listening for
+// the verdict, and only call it a miss once this window closes too.
+#define HACK_GRACE_MS  6000UL
+uint32_t  hackGraceUntil      = 0;
+bool      hackVerdictLate     = false;   // arrived after the slot gave up
 
 // ── Staged recon dossier ─────────────────────
 // The mini-game needs the target's numbers in hand before the player has
@@ -284,6 +299,36 @@ const char* pktTypeName(uint8_t t) {
   #define LORA_LOG(fmt, ...) do {} while (0)
 #endif
 
+// ── Recon attempt ledger ─────────────────────
+// recon_count lives in the node record, and the node record does not last as
+// long as the rule it enforces. findOrAddNode() memsets a slot when it evicts,
+// and /api/action?a=clearnodes wipes the whole table — either one silently
+// hands back three fresh recon attempts on a target they were already spent
+// on. In a room of more than MAX_KNOWN_NODES players that happens by itself,
+// without anyone trying to cheat.
+//
+// The ledger outlives the table, so the budget survives both. RAM only, and
+// deliberately: the locks that matter are already NVS-backed in the sketch's
+// hackedList/failList, and writing flash on every recon would let anyone in
+// radio range drive wear on your device.
+#define RECON_LEDGER_SIZE 24
+struct ReconLedgerEntry { uint32_t chip_id; uint8_t spent; };
+ReconLedgerEntry reconLedger[RECON_LEDGER_SIZE];
+uint8_t          reconLedgerIdx = 0;
+
+uint8_t reconLedgerGet(uint32_t chip_id) {
+  for (int i = 0; i < RECON_LEDGER_SIZE; i++)
+    if (reconLedger[i].chip_id == chip_id) return reconLedger[i].spent;
+  return 0;
+}
+void reconLedgerSet(uint32_t chip_id, uint8_t spent) {
+  for (int i = 0; i < RECON_LEDGER_SIZE; i++)
+    if (reconLedger[i].chip_id == chip_id) { reconLedger[i].spent = spent; return; }
+  reconLedger[reconLedgerIdx].chip_id = chip_id;
+  reconLedger[reconLedgerIdx].spent   = spent;
+  reconLedgerIdx = (uint8_t)((reconLedgerIdx + 1) % RECON_LEDGER_SIZE);
+}
+
 // ── Node helpers ─────────────────────────────
 KnownNode* findOrAddNode(uint32_t chip_id) {
   for (int i = 0; i < knownCount; i++)
@@ -296,13 +341,15 @@ KnownNode* findOrAddNode(uint32_t chip_id) {
       if ((uint32_t)(now - knownNodes[i].last_seen_ms) >
           (uint32_t)(now - knownNodes[oldest].last_seen_ms)) oldest = i;
     memset(&knownNodes[oldest], 0, sizeof(KnownNode));
-    knownNodes[oldest].chip_id = chip_id;
-    knownNodes[oldest].faction = '?';
+    knownNodes[oldest].chip_id     = chip_id;
+    knownNodes[oldest].faction     = '?';
+    knownNodes[oldest].recon_count = reconLedgerGet(chip_id);
     return &knownNodes[oldest];
   }
   KnownNode* n = &knownNodes[knownCount++];
   memset(n, 0, sizeof(KnownNode));
   n->chip_id = chip_id; n->faction = '?';
+  n->recon_count = reconLedgerGet(chip_id);   // a fresh row is not a fresh budget
   return n;
 }
 
@@ -343,7 +390,7 @@ KnownNode* touchNode(uint32_t chip_id) {
 // Age out nodes nobody has heard from (T2.3 — fixes D8).
 //
 // NOTE: eviction drops the node's 12 h hack retry cooldown along with it. The
-// 7-day win lock is safe because it lives in the sketch's persisted hackedList,
+// 12-hour win lock is safe because it lives in the sketch's persisted hackedList,
 // but the retry cooldown is per-node RAM. T4.4 persists it to NVS keyed by chip
 // ID so walking out of range cannot be used to clear a failed-hack cooldown.
 void pruneNodes() {
@@ -476,6 +523,41 @@ int txQueueDepth() {
   return n;
 }
 
+// Is any queued frame due to go out within the next `ms`? Distinct from
+// txQueueDepth(), which counts frames parked for a minute by the duty-cycle
+// deferral just the same as one that is ready now.
+static bool txQueueDueWithin(uint32_t ms) {
+  uint32_t now = millis();
+  for (int i = 0; i < TXQ_SIZE; i++)
+    if (txq[i].active && (int32_t)(now + ms - txq[i].sendAfterMs) >= 0) return true;
+  return false;
+}
+
+// Push what is queued onto the air before the caller goes deaf.
+//
+// display.update() busy-waits on the panel's BUSY line for about two seconds,
+// and serviceTxQueue() only runs from loraTick() <- loop(). So a reply queued
+// during the same pass that raises an event screen sits in the queue for the
+// whole refresh — and that is long enough to lose a race the *other* device is
+// timing. A defender's HACK_REPLY is deferred 60-120 ms by deferReply() and
+// then held behind the alert screen, while the attacker's four tries expire at
+// TX_MAX_TRIES * (TX_RETRY_BASE_MS + jitter) = 1.6-2.8 s. The attacker is told
+// NO RESPONSE by a defender that answered immediately.
+//
+// Called before every blocking panel write. Cheap when there is nothing to do.
+void loraTick();          // defined below; loraFlushTx is the only early caller
+void loraFlushTx(uint32_t budgetMs) {
+  if (!loraReady) return;
+  uint32_t t0 = millis();
+  for (;;) {
+    uint32_t spent = (uint32_t)(millis() - t0);
+    if (spent >= budgetMs) return;
+    if (radioState != RS_TX && !txQueueDueWithin(budgetMs - spent)) return;
+    loraTick();
+    delayMicroseconds(300);
+  }
+}
+
 // ─────────────────────────────────────────────
 //  T1.2 — reliable send slot (one in flight)
 // ─────────────────────────────────────────────
@@ -552,8 +634,9 @@ static void clearSlot(PendingTx& slot, bool success) {
   if (&slot == &pendingUser) loraActionState = success ? LA_SUCCESS : LA_TIMEOUT;
   // A hack whose target never answered must not leave the sketch waiting.
   if (!success && slot.type == PKT_HACK_REQ && hackInFlight) {
-    hackInFlight = false;
-    hackTimedOut = true;
+    hackInFlight   = false;
+    hackTimedOut   = true;
+    hackGraceUntil = millis() + HACK_GRACE_MS;   // keep listening a little longer
   }
   if (!success) {
     loraTimeouts++;
@@ -681,7 +764,11 @@ static void sendAck(uint32_t to_id, uint8_t seq, uint8_t ackedType) {
   ack.hdr.seq   = seq;                 // echo the seq being acknowledged
   ack.hdr.flags = PKTFLAG_IS_ACK;
   ack.ack_type  = ackedType;
-  enqueueTx(&ack, sizeof(ack), REPLY_DELAY_MIN_MS);
+  // Same jitter deferReply() uses. Two devices answering different senders in
+  // the same instant would otherwise both schedule for exactly REPLY_DELAY_MIN_MS,
+  // CAD together, and collide — then back off into the same window and do it
+  // again. Rare today; guaranteed the moment anything raises the frame rate.
+  enqueueTx(&ack, sizeof(ack), REPLY_DELAY_MIN_MS + random(0, REPLY_DELAY_JIT_MS));
   loraAcksSent++;
 }
 
@@ -850,14 +937,23 @@ void loraHandlePacket(uint8_t* buf, int len) {
       // You engaged them, so you know who and what they are. The rest of the
       // dossier still has to be played for.
       reconAtLeast(n, RECON_T_FACTION);
-      if (hackInFlight && hackTargetId == p->hdr.from_id) {
+      // Accept it while the hack is live, and also during the grace window
+      // after the retries gave up — the defender rolled either way, and a
+      // verdict we drop is a hack that resolves on their device and not on
+      // ours. hackTargetId is not cleared on timeout, so it still names them.
+      bool late = (!hackInFlight && hackTimedOut &&
+                   (int32_t)(millis() - hackGraceUntil) < 0);
+      if ((hackInFlight || late) && hackTargetId == p->hdr.from_id) {
         hackInFlight        = false;
+        hackTimedOut        = false;      // it answered after all
+        hackVerdictLate     = late;
         hackVerdictReady    = true;
         hackVerdictWon      = (p->outcome == HACK_WIN);
         hackVerdictFirewall = p->firewall;
         hackVerdictFaction  = (char)p->faction;
-        LORA_LOG("hack verdict from %08lx: %s",
-                 (unsigned long)p->hdr.from_id, hackVerdictWon ? "WON" : "LOST");
+        LORA_LOG("hack verdict from %08lx: %s%s",
+                 (unsigned long)p->hdr.from_id, hackVerdictWon ? "WON" : "LOST",
+                 late ? " (late — rescued from the grace window)" : "");
       }
       break;
     }
@@ -1200,6 +1296,14 @@ String loraDiagJson() {
   j += "\"timeouts\":"      + String(loraTimeouts) + ",";
   j += "\"dupsDropped\":"   + String(loraDupsDropped) + ",";
   j += "\"crcErrors\":"     + String(loraCrcErrors) + ",";
+  // Both of these existed as counters and neither was ever reported. badSig is
+  // the only signal that frames are being rejected by the HMAC rather than lost
+  // — without it a signing mistake looks exactly like being out of range. heap
+  // is the only memory number the firmware produces at all.
+  j += "\"badSig\":"        + String(loraBadSig) + ",";
+  j += "\"replaysDropped\":"+ String(loraReplaysDropped) + ",";
+  j += "\"heap\":"          + String((unsigned long)ESP.getFreeHeap()) + ",";
+  j += "\"minHeap\":"       + String((unsigned long)ESP.getMinFreeHeap()) + ",";
   j += "\"txErrors\":"      + String(loraTxErrors) + ",";
   j += "\"lastTxError\":"   + String(loraLastTxError) + ",";
   j += "\"notForMe\":"      + String(loraDroppedNotForMe) + ",";

@@ -152,7 +152,9 @@ struct ESPStub {
   uint64_t getEfuseMac64() { return 0x1122334455ULL; }
   void restart() {}
   uint32_t getFreeHeap() { return 180000; }
+  uint32_t getMinFreeHeap() { return 150000; }
   uint32_t getHeapSize() { return 320000; }
 };
 extern ESPStub ESP;
 inline uint32_t esp_random() { return 0x12345678u; }
+inline void delayMicroseconds(uint32_t us) { g_millis += (us + 999) / 1000; }
