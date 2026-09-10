@@ -462,6 +462,61 @@ __audio.started = 0;
 sfxTest();
 ck(__audio.started === 6, "HEAR IT plays the cue on demand");
 
+// ── echoes: presence past direct range, and nothing more ──
+const ECHO = {id:"cafe0009", name:"UNKNOWN-0009", pwned:false,
+              via:"IronGate", viaId:"beef0002", reachable:true, ageMs:41000};
+S = {...S1, nodes:[...S1.nodes], echoes:[ECHO], mail:{pending:1,carried:2,delivered:3}};
+render();
+
+ck(!el("echohdr").className.includes("hide"), "the echoes section appears when there are echoes");
+ck(el("ecount").textContent.includes("1"), "and says how many are out there");
+const eh = el("echolist").innerHTML;
+ck(eh.includes("UNKNOWN-0009"), "an echo is listed by name");
+ck(eh.includes("ECHO"), "and labelled as an echo");
+ck(eh.includes("IronGate"), "naming the neighbour who can reach them");
+
+// The load-bearing one. If an echo ever grows a HACK or RECON button, a player
+// can act on somebody their radio has never heard, which is the whole thing
+// this design exists to prevent.
+ck(!/onclick="act\('hack'/.test(eh), "an echo has NO hack button");
+ck(!/seqFromRadar/.test(eh), "and no recon button");
+ck(/mailTo\(/.test(eh), "only a courier message");
+
+// It must not be smuggled into the radar either.
+ck(!el("nodelist").innerHTML.includes("UNKNOWN-0009"), "and never appears among the contacts");
+ck(el("rcount").textContent === S.nodes.length + " in range",
+   "the in-range count still counts only what we hear ourselves");
+
+// No signal reading anywhere on an echo: the strength we measured belongs to
+// whoever relayed it, and printing it would put VERY CLOSE on someone far away.
+ck(!/VERY CLOSE|CLOSE|DISTANT|FADING/.test(eh), "an echo shows no proximity band");
+
+// Message targets: direct nodes take a message, echoes take mail.
+// The shim does not parse innerHTML into children, so assert on the markup
+// itself rather than on a children collection that is always empty here.
+ck(el("mto").innerHTML.includes('value="cafe0009"'),
+   "an echo can be addressed in the message picker");
+ck(el("mto").innerHTML.includes("via IronGate"),
+   "and is shown as travelling via the neighbour who can reach them");
+ck(!el("pingto").innerHTML.includes("cafe0009"),
+   "but not in the ping picker \u2014 a ping measures a link, and there isn't one");
+ck(el("pingto").innerHTML.includes('value="' + S.nodes[0].id + '"'),
+   "which still lists the nodes we can actually hear");
+ck(isEcho("cafe0009") === true, "sendMsg routes an echo to the courier");
+ck(isEcho(S.nodes[0].id) === false, "and a direct contact to a plain message");
+
+ck(el("mailstat").textContent.includes("carrying 2"), "the courier bag reports what it holds");
+
+// An echo whose bridge has gone is not shown at all.
+S = {...S, echoes:[{...ECHO, reachable:false}]}; render();
+ck(el("echohdr").className.includes("hide"), "an unreachable echo is hidden entirely");
+ck(el("echolist").innerHTML === "", "and leaves nothing behind");
+
+// A backdoored echo keeps its earned codename.
+S = {...S, echoes:[{...ECHO, name:"VoidCrypt", pwned:true}]}; render();
+ck(el("echolist").innerHTML.includes("VoidCrypt"), "a backdoored echo shows its codename");
+ck(el("echolist").innerHTML.includes("PWNED"), "and is marked as owned");
+
 console.log("\nhelpers: fmtLeft(7d)=" + fmtLeft(604800000) +
             "  fmtLeft(11h22m)=" + fmtLeft(40920000) + "  fmtAge(4.2s)=" + fmtAge(4200));
 console.log(bad ? `\n${bad} FAILURES` : "\nall portal render checks passed");

@@ -76,7 +76,23 @@ int main(int argc, char** argv) {
     {"page-lastmsg-none", []{ lastMsgAt = 0; lastSentAt = 0;
                               lastMsgText = ""; lastSentText = "";
                               displayLastMsg(); }},
-    {"page-census",      []{ lastMsgAt = 0; displayCensus(); }},
+    {"page-census",      []{ lastMsgAt = 0; echoCount = 0; displayCensus(); }},
+    // The same page with reach beyond the room, which is the layout that can
+    // actually collide: the echo suffix shares the title line.
+    {"page-census-echo", []{ lastMsgAt = 0;
+                             echoCount = 3;
+                             echoNodes[0] = {0xCAFE0001, 0xBEEF0001, g_millis};
+                             echoNodes[1] = {0xCAFE0002, 0xBEEF0001, g_millis};
+                             echoNodes[2] = {0xCAFE0003, 0xBEEF0002, g_millis};
+                             displayCensus(); echoCount = 0; }},
+    {"page-mail-none",   []{ lastMsgAt = 0; lastSentAt = 0;
+                             mailQueue(0xCAFE0001, myChipID32, "see you at the gate", false);
+                             displayLastMsg();
+                             memset(mailbox, 0, sizeof(mailbox)); }},
+    {"page-mail-in",     []{ lastMsgFrom = 0xCAFE0001; lastMsgAt = g_millis - 240000;
+                             lastMsgText = "came the long way round";
+                             lastMsgCarried = true; lastSentAt = 0;
+                             displayLastMsg(); lastMsgCarried = false; }},
     {"newnode",     []{ displayNewNode(0xBEEF0001, 9, 'W'); }},
     {"newnode-unknown", []{ displayNewNode(0xBEEF0002, 3, 'R'); }},
     {"hack-win",    []{ displayHackSuccess("beef0001", 45, "Clean in, clean out."); }},

@@ -9,3 +9,5 @@ test/test_qr_mask
 test/render_eink
 test/out/
 test/__pycache__/
+test/test_pages
+test/test_mesh

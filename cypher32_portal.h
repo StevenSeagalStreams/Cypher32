@@ -81,6 +81,9 @@ textarea{min-height:64px;resize:none}
 .cen .t{flex:1;height:12px;background:#0d1a12;border:1px solid #23402e;border-radius:3px;overflow:hidden}
 /* display:block or the width is ignored — a span is inline, and an inline
    box takes its width from its content, which here is nothing at all. */
+.echo{border:1px dashed #2c3a4d;border-radius:10px;padding:10px 12px;
+  margin-bottom:8px;background:rgba(255,255,255,.015);opacity:.82}
+.echo b{font-weight:600;color:#9fb3c8}
 .cen .f{display:block;height:100%;background:#2f9e5c}
 .cen .c{min-width:20px;text-align:right;color:#b6ffcf;font-variant-numeric:tabular-nums}
 .cen.fB .f{background:#3a6bb5}.cen.fW .f{background:#8fa3b8}
@@ -306,6 +309,11 @@ textarea{min-height:64px;resize:none}
         <h3 style="margin:0">RADAR</h3><span class="xs mut" id="rcount">—</span>
       </div>
       <div id="nodelist"></div>
+      <div class="row hide" id="echohdr" style="margin:16px 0 10px">
+        <h3 style="margin:0;font-size:13px;opacity:.75">ECHOES</h3>
+        <span class="xs mut" id="ecount">&mdash;</span>
+      </div>
+      <div id="echolist"></div>
       <div class="card hide" id="nonodes">
         <div class="ct">Nothing in range</div>
         <p class="sm mut">Your device is listening. Other players appear here
@@ -340,6 +348,12 @@ textarea{min-height:64px;resize:none}
         <textarea id="mtxt" maxlength="32" placeholder="Max 32 characters"></textarea>
         <div class="xs mut" id="mcount">0 / 32</div>
         <button onclick="sendMsg()">TRANSMIT</button>
+        <p class="xs mut" style="margin-top:8px">Someone listed as
+        <b>via</b> is out of your range. That message is handed to the
+        neighbour who can hear them and delivered when they next meet &mdash;
+        it travels in somebody's pocket, not over the air.</p></div>
+      <div class="card"><div class="ct">Courier bag</div>
+        <div class="xs mut" id="mailstat">Nothing waiting</div>
       </div>
       <div class="card"><div class="ct">Inbox</div><div id="inbox"></div></div>
     </div>
@@ -536,8 +550,15 @@ function act(what,extra){
     if(e.code===401){needPw("That password was not accepted. Try again.");return}
     banner(e.message||"Failed","bad")})}
 
+var echoNodes=[];
+function isEcho(id){for(var i=0;i<echoNodes.length;i++)if(echoNodes[i].id===id)return true;return false}
+// A node we can hear takes a direct message; one we only know by rumour takes
+// mail. Same box, same 32 characters, different journey.
 function sendMsg(){var t=$("mtxt").value.trim();if(!t)return;
-  act("msg",{id:$("mto").value,txt:t});$("mtxt").value="";$("mcount").textContent="0 / 32"}
+  var id=$("mto").value;if(!id)return;
+  act(isEcho(id)?"mail":"msg",{id:id,txt:t});
+  $("mtxt").value="";$("mcount").textContent="0 / 32"}
+function mailTo(id){tab("msgs");var e=$("mto");e.value=id;$("mtxt").focus()}
 function changePw(){var p=$("npw").value;
   if(p.length<6){banner("Password must be at least 6 characters","bad");return}
   if(!pw()){needPw("Enter the current password first.");return}
@@ -1079,11 +1100,48 @@ function render(){
       '</div></div>'}).join("");
   radarNodes=ns;
 
+  // Echoes, drawn in their own section and never merged into the radar. A
+  // dashed border and no signal bars, because there is no signal to report:
+  // the strength we measured belongs to whoever relayed the echo, not to the
+  // node it names, and printing it here would put "VERY CLOSE" on somebody a
+  // kilometre away.
+  var es=(S.echoes||[]).filter(function(e){return e.reachable});
+  echoNodes=es;
+  $("echohdr").className="row"+(es.length?"":" hide");
+  $("ecount").textContent=es.length?es.length+" beyond direct range":"";
+  $("echolist").innerHTML=es.map(function(e,ei){
+    return '<div class="echo">'+
+      '<div class="row"><div><b>'+esc(e.name)+'</b> '+
+        (e.pwned?'<span class="pill fB" title="backdoor open">PWNED</span> ':'')+
+        '<span class="pill" style="opacity:.6">ECHO</span></div>'+
+        '<div class="xs mut">'+fmtAge(e.ageMs)+'</div></div>'+
+      '<div class="xs mut" style="margin-top:6px">'+
+        'Out of your range. <b>'+esc(e.via)+'</b> can hear them.</div>'+
+      '<div class="xs mut" style="margin-top:6px">'+
+        'You cannot scout or hack an echo &mdash; only what your own radio '+
+        'hears counts. You can send them a message and it will travel via '+
+        esc(e.via)+'.</div>'+
+      '<div class="row" style="margin-top:10px">'+
+        '<button class="btn inline ghost" onclick="mailTo(\''+e.id+'\')">'+
+        'SEND VIA COURIER</button></div>'+
+    '</div>'}).join("");
+
   // message targets + inbox
   var opts=ns.map(function(n){return'<option value="'+n.id+'">'+esc(n.name)+'</option>'}).join("");
+  var eopts=es.map(function(e){
+    return'<option value="'+e.id+'">'+esc(e.name)+' \u2014 via '+esc(e.via)+'</option>'}).join("");
   ["mto","pingto"].forEach(function(id){
-    var e=$(id),keep=e.value;e.innerHTML=opts||'<option value="">No nodes in range</option>';
+    var e=$(id),keep=e.value;
+    // Only messages can be addressed past direct range; a ping measures a
+    // link, so offering an echo there would be measuring nothing.
+    var list=(id==="mto")?opts+eopts:opts;
+    e.innerHTML=list||'<option value="">No nodes in range</option>';
     if(keep)e.value=keep});
+  var m=S.mail||{};
+  $("mailstat").textContent=
+    (m.pending?m.pending+" waiting to be delivered":"Nothing waiting")+
+    (m.carried?" \u00b7 carrying "+m.carried+" for others":"")+
+    (m.delivered?" \u00b7 "+m.delivered+" delivered":"");
   var inbox=S.nodes.filter(function(n){return n.msg});
   $("inbox").innerHTML=inbox.length?inbox.map(function(n){
     return'<div class="msg"><div class="xs mut">'+esc(n.name)+
