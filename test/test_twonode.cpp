@@ -249,7 +249,11 @@ int main() {
     runUntil(A, B, 8000, []{ return loraActionState == LA_TIMEOUT; });
     load(A);
     CHECK(loraActionState == LA_TIMEOUT, "reports NO RESPONSE");
-    CHECK(millis() - t0 < 4000,          "and does so within 4 s");
+    // Not a wall-clock number — the retry budget moves with the range profile,
+    // and at SF9 four attempts legitimately take eight seconds. What must hold
+    // is that it gives up inside that budget rather than hanging.
+    CHECK(millis() - t0 <= (uint32_t)(TX_MAX_TRIES *
+          (TX_RETRY_BASE_MS + TX_RETRY_JITTER_MS)), "and does so inside its retry budget");
     printf("  gave up after %u ms\n", millis() - t0);
     save(A);
   }
@@ -302,7 +306,8 @@ int main() {
     air.clear(); lossPercent = 100; g_millis = 1000;
 
     load(A); loraHackStart(ID_B, 5); save(A);
-    runUntil(A, B, 12000, []{ return false; });
+    runUntil(A, B, TX_MAX_TRIES * (TX_RETRY_BASE_MS + TX_RETRY_JITTER_MS)
+                   + HACK_GRACE_MS + 3000, []{ return false; });
 
     load(A);
     CHECK(hackTimedOut, "a target that truly never answers still reports a timeout");

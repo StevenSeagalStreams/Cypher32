@@ -16,7 +16,7 @@ CXXFLAGS := -std=c++17 -I stub -Wall -Wno-format
 BINS     := test_link test_twonode test_mesh test_pages
 
 .PHONY: all run asan portal lint qr sketch shots clean
-all: lint sketch run portal qr
+all: lint sketch run profiles portal qr
 
 run: $(BINS)
 	@for b in $(BINS); do echo "── $$b ──"; ./$$b || exit 1; echo; done
@@ -59,6 +59,23 @@ shots: render_eink
 	@python3 pbm2png.py out ../docs/img
 	@python3 portal/extract.py >/dev/null
 	@NODE_PATH=$${NODE_PATH:-/opt/node22/lib/node_modules} node shoot_portal.js ../docs/img
+
+.PHONY: profiles
+# Every range profile must build and pass. The link-layer timeouts are derived
+# from the profile's spreading factor, so a change that is fine at SF7 can
+# abort every large frame at SF10 — and nothing else in the suite would notice,
+# because the suite only ever builds one profile.
+profiles:
+	@for p in FAST LONG EPIC; do \
+	  printf "  %-5s " $$p; \
+	  $(CXX) -std=c++17 -I stub -w -DLORA_PROFILE=LORA_PROFILE_$$p \
+	    -o /tmp/c32_link_$$p test_link.cpp || exit 1; \
+	  $(CXX) -std=c++17 -I stub -w -DLORA_PROFILE=LORA_PROFILE_$$p \
+	    -o /tmp/c32_mesh_$$p test_mesh.cpp || exit 1; \
+	  l=$$(/tmp/c32_link_$$p | tail -1); m=$$(/tmp/c32_mesh_$$p | tail -1); \
+	  echo "link: $$l   mesh: $$m"; \
+	  case "$$l$$m" in *"1 failures"*|*[2-9]" failures"*) exit 1;; esac; \
+	done
 
 render_eink: render_eink.cpp ../cypher32.ino ../cypher32_lora.h ../cypher32_packets.h \
              ../cypher32_portal.h ../cypher32_qr.h ../cypher32_crypto.h \

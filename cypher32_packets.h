@@ -3,7 +3,7 @@
 
 // T4.7 — the single source of truth for the version. Shown in the portal
 // Config tab and in /api/diag.
-#define FIRMWARE_VERSION "v70"
+#define FIRMWARE_VERSION "v71"
 
 // ─────────────────────────────────────────────
 //  CYPHER32 LORA PACKET PROTOCOL  — v67
@@ -127,14 +127,132 @@ static const uint8_t LORA_KEY[16] = {
   0x91, 0xE6, 0x2C, 0x47, 0xD0, 0x8B, 0xA5, 0x6F
 };
 
-// ── LoRa radio settings (SX1262 @ 868 MHz EU) ─
-#define LORA_FREQ       868.0   // MHz — EU ISM band
-#define LORA_BW         125.0   // kHz
-#define LORA_SF         7       // SF7 = ~300m range, ~50ms airtime (SF9 crashed WDT)
+// ── RANGE PROFILE ────────────────────────────
+//  EVERY DEVICE IN YOUR GAME MUST USE THE SAME PROFILE. Spreading factor and
+//  frequency are both part of how a LoRa receiver locks onto a signal: two
+//  devices on different profiles are not "weakly connected", they are deaf to
+//  each other and will never appear on each other's radar.
+//
+//  Where the range comes from. LoRa's advertised 2-15 km is SF11/SF12 at full
+//  legal power with line of sight. This project shipped SF7 at 14 dBm, which
+//  is the SHORTEST-range configuration LoRa has — chosen for airtime, not for
+//  distance. Two independent levers move it:
+//
+//    Spreading factor   every step up is +2.5 dB of receiver sensitivity and
+//                       doubles the airtime. SF7 -> SF9 is +5 dB.
+//    Sub-band           ETSI splits 868 MHz into bands with different limits.
+//                         g1  868.0-868.6   14 dBm (25 mW)   1 % duty
+//                         g3  869.4-869.65  27 dBm (500 mW) 10 % duty
+//                       Moving to g3 is +8 dB (the SX1262 caps at 22 dBm) AND
+//                       ten times the airtime budget. It is the same band
+//                       Meshtastic uses for its EU region, for these reasons.
+//
+//  Range scales roughly as 10^(dB/(10*n)) with n~2.7 outdoors in mixed terrain.
+//
+//  NOTE ON THE OLD FREQUENCY: this was 868.0 MHz, which with 125 kHz of
+//  bandwidth occupies 867.94-868.06 — the lower half sits BELOW the g1 band
+//  edge at 868.0. 868.1 is the conventional g1 centre and is what FAST uses now.
+//
+//  NOTE ON "SF9 crashed WDT": that comment dated from before T1.4, when TX was
+//  a blocking call. Transmission is a non-blocking state machine now and the
+//  task watchdog is disabled deliberately in setup(). Untested on hardware.
+#define LORA_PROFILE_FAST  0   // SF7  @ 868.1  14 dBm — shortest range, snappiest
+#define LORA_PROFILE_LONG  1   // SF9  @ 869.5  22 dBm — ~3x the range
+#define LORA_PROFILE_EPIC  2   // SF11 @ 869.5  22 dBm — ~4.6x, slow and chatty
+//
+//  HOW MANY PEOPLE EACH PROFILE HOLDS. Duty cycle is per transmitter, but the
+//  channel is shared, and a CAD-gated ALOHA channel starts losing frames to
+//  collisions above roughly a third occupancy. Measured by test_mesh at idle:
+//
+//    FAST  0.30 % per node ->  6 % of the channel at 20 devices — comfortable
+//    LONG  0.70 % per node -> 14 % at 20 devices — fine
+//    EPIC  1.81 % per node -> 36 % at 20 devices — TOO CROWDED
+//
+//  So EPIC is for a handful of people spread across a city, not for a room
+//  with twenty in it. Range and capacity are the same budget spent twice.
+
+#ifndef LORA_PROFILE
+#define LORA_PROFILE LORA_PROFILE_LONG
+#endif
+
+#if   LORA_PROFILE == LORA_PROFILE_FAST
+  #define LORA_FREQ      868.1
+  #define LORA_SF        7
+  #define LORA_PWR       14
+  #define LORA_BAND      "g1"
+  #define LORA_DUTY_LEGAL_PCT  1.0f
+  #define LORA_DUTY_SELF_PCT   0.8f
+  #define LORA_BEACON_MIN_MS      25000
+  #define LORA_BEACON_MAX_MS      35000
+  #define PROFILE_NAME   "FAST"
+#elif LORA_PROFILE == LORA_PROFILE_LONG
+  #define LORA_FREQ      869.525
+  #define LORA_SF        9
+  #define LORA_PWR       22
+  #define LORA_BAND      "g3"
+  #define LORA_DUTY_LEGAL_PCT  10.0f
+  // Well under the legal 10 %. The limit that actually bites is not the law,
+  // it is the shared channel: twenty devices at 1 % each is 20 % occupancy,
+  // and a CAD-gated ALOHA channel starts losing frames to collisions above
+  // roughly a third. So the self-cap is set by how many people are in the
+  // room, not by what the regulator allows.
+  #define LORA_DUTY_SELF_PCT   1.5f
+  #define LORA_BEACON_MIN_MS      40000
+  #define LORA_BEACON_MAX_MS      55000
+  #define PROFILE_NAME   "LONG"
+#elif LORA_PROFILE == LORA_PROFILE_EPIC
+  #define LORA_FREQ      869.525
+  #define LORA_SF        11
+  #define LORA_PWR       22
+  #define LORA_BAND      "g3"
+  #define LORA_DUTY_LEGAL_PCT  10.0f
+  #define LORA_DUTY_SELF_PCT   2.5f
+  #define LORA_BEACON_MIN_MS      90000
+  #define LORA_BEACON_MAX_MS     120000
+  #define PROFILE_NAME   "EPIC"
+#else
+  #error "LORA_PROFILE must be FAST, LONG or EPIC"
+#endif
+
+// ── LoRa radio settings (SX1262, EU 868 MHz) ─
+#define LORA_BW         125.0   // kHz — narrower would be more sensitive still,
+#define LORA_BW_HZ      125000UL// but 125 is what fits g3's 250 kHz with margin
 #define LORA_CR         5       // coding rate 4/5
 #define LORA_SYNC       0x12    // private network sync word (not 0x34=LoRaWAN)
-#define LORA_PWR        14      // dBm transmit power (legal EU max = 14)
 #define LORA_PREAMBLE   8
+
+// ── Time-on-air at compile time ──────────────
+//  Semtech AN1200.13, in integers so the link-layer timeouts can be DERIVED
+//  from the profile rather than hardcoded for one spreading factor. They were
+//  all written for SF7: TX_HARD_TIMEOUT_MS was 500 ms, and the largest frame
+//  at SF10 takes 657 ms — the "recovery" timer would have aborted every large
+//  frame mid-transmission, on a radio that was working perfectly.
+constexpr uint32_t toaSymUs(int sf) {
+  return (uint32_t)(((uint64_t)(1ULL << sf) * 1000000ULL) / LORA_BW_HZ);
+}
+// Low-data-rate optimise is mandatory once a symbol exceeds 16 ms (SF11/SF12
+// at 125 kHz) and changes the payload maths, so it is not optional here.
+constexpr int toaDe(int sf) { return toaSymUs(sf) > 16000 ? 1 : 0; }
+constexpr int toaBlocks(int payload, int sf) {
+  return (8 * payload - 4 * sf + 44) <= 0 ? 0
+       : (8 * payload - 4 * sf + 44 + 4 * (sf - 2 * toaDe(sf)) - 1)
+         / (4 * (sf - 2 * toaDe(sf)));
+}
+constexpr uint32_t toaUs(int payload, int sf) {
+  return ((4 * LORA_PREAMBLE + 17) * toaSymUs(sf)) / 4
+       + (8 + toaBlocks(payload, sf) * LORA_CR) * toaSymUs(sf);
+}
+constexpr uint32_t toaMs(int payload, int sf) { return (toaUs(payload, sf) + 999) / 1000; }
+
+// The biggest thing that can be on the air, and the round trip it implies.
+#define LORA_MAX_FRAME      64
+constexpr uint32_t LORA_MAX_TOA_MS = toaMs(LORA_MAX_FRAME, LORA_SF);
+
+// Checked against the float loraTimeOnAirMs() the firmware already shipped.
+static_assert(toaMs(17, 7) == 52,  "SF7 beacon should be ~51.5 ms");
+static_assert(toaMs(64, 7) == 119, "SF7 max frame should be ~118 ms");
+static_assert(toaMs(64, 9) == 391, "SF9 max frame should be ~390 ms");
+static_assert(toaMs(64, 12) == 2794, "SF12 max frame should be ~2793 ms");
 
 // ── SX1262 pin mapping (from Wireless Paper schematic) ─
 #define LORA_NSS   8   // GPIO8  = SPI chip select
@@ -256,8 +374,13 @@ static_assert(sizeof(PktEcho) == 11 + 1 + 4 * ECHO_MAX_PEERS, "PktEcho has paddi
 static_assert(sizeof(PktMail) == 11 + 4 + 4 + 1 + MAIL_TEXT_MAX + 1, "PktMail has padding in it");
 
 // ── Node presence (T2.3) ─────────────────────
-#define NODE_ACTIVE_MS   90000UL    // seen within 90 s → ACTIVE
-#define NODE_FADING_MS  300000UL    // 90 s – 5 min → FADING, then evicted
+// Presence windows scale with the beacon cadence, which scales with the
+// profile. Fixed at 90 s / 5 min these were sized for a 25-35 s beacon; at
+// EPIC's 90-120 s cadence every device in the room would show FADING between
+// its own beacons and then be evicted while standing right next to you.
+// Three missed beacons is FADING, ten is gone.
+#define NODE_ACTIVE_MS   ((unsigned long)(3UL * LORA_BEACON_MAX_MS))
+#define NODE_FADING_MS   ((unsigned long)(10UL * LORA_BEACON_MAX_MS))
 #define RSSI_HIST        4          // rolling average depth (T2.1)
 
 // ── Known node entry ─────────────────────────

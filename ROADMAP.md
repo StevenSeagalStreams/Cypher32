@@ -307,7 +307,9 @@ verification — T0.4 and the field test protocol — not more code.**
 
 ## Explicitly out of scope
 
-- Any hardware change — no external antenna, no different board, no added sensors.
+- Any hardware change — no different board, no added sensors. (A better 868 MHz
+  antenna on the existing connector is not a firmware matter and is the single
+  cheapest thing anyone can do about range; see the README.)
 - Any change to the avatar sprites, moods, speech bubble, or e-ink layout.
 - **Mesh routing / multi-hop relay of game traffic. Direct range only.** This
   stands, and the arithmetic is why: one beacon rebroadcast once by each of

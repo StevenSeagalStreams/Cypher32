@@ -37,8 +37,10 @@ for f in sources:
     # this replaces missed a pointer type ("const char* LBL[]") and every
     # declarator after the first ("const int TRACK_X = 58, TRACK_W = 170"),
     # which made the linter reject perfectly ordinary C++ and pushed you
-    # towards renaming real constants to keep it quiet.
-    for decl in re.findall(r"\bconst\b[^;{}]*", text):
+    # towards renaming real constants to keep it quiet. constexpr counts too:
+    # \bconst\b does not match inside "constexpr", so a compile-time constant
+    # read as undeclared and the sketch was reported as broken when it was not.
+    for decl in re.findall(r"\bconst(?:expr)?\b[^;{}]*", text):
         defined |= set(re.findall(r"\b([A-Z][A-Z0-9_]{2,})\s*(?:=|\[)", decl))
     # enum bodies, e.g. enum Foo { A_B, C_D };
     for body in re.findall(r"\benum\s+\w*\s*\{([^}]*)\}", text, re.S):
