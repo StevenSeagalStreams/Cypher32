@@ -323,7 +323,13 @@ about them goes dark again, unless you took the backdoor.
 Both cooldowns survive a reboot and survive the target walking out of range, so
 neither can be reset by power-cycling or waiting for them to drop off your radar.
 
-<img src="docs/img/portal-msgs.png" width="280" align="right" alt="The Msgs tab: a target picker, a 32-character field, and the inbox">
+<img src="docs/img/portal-msgs.png" width="280" align="right" alt="The Msgs tab: a target picker, a 32-character field, the courier bag, and an inbox of five messages, two of them marked as carried via another player">
+
+The Inbox keeps **the last ten messages anyone sent you**, newest first, each
+showing the route it took. It survives the sender walking away: the per-node
+inbox it replaced held one message per contact and lost all of them a few
+minutes after that contact went out of range — which is exactly when you would
+want to read them again.
 
 **Talk to them.** 32 characters, straight over the air, no server in between.
 Sending someone a message identifies you to them for free — you signed it by
@@ -358,7 +364,62 @@ so their effective win rate is lower than the number shown.
 
 Signal only. No names. No location. Nothing beyond what the game requires.
 
-All traffic runs at **868 MHz — SF7 — BW 125 kHz — CR 4/5 — sync 0x12**. Short airtime. Small packets. Devices are never quiet for long.
+### Range profiles
+
+**Every device in your game must be flashed with the same profile.** Spreading
+factor and frequency are both part of how a LoRa receiver locks onto a signal.
+Two devices on different profiles are not weakly connected — they are deaf to
+each other and will never appear on each other's radar.
+
+Set it at the top of `cypher32_packets.h`:
+
+```c
+#define LORA_PROFILE LORA_PROFILE_LONG
+```
+
+| Profile | Radio | Range | Per node | 20 devices |
+|---|---|---|---|---|
+| `FAST` | SF7 @ 868.1 MHz, 14 dBm | baseline | 0.30 % | 6 % of channel |
+| `LONG` *(default)* | SF9 @ 869.525 MHz, 22 dBm | **~3×** | 0.70 % | 14 % |
+| `EPIC` | SF11 @ 869.525 MHz, 22 dBm | **~4.6×** | 1.81 % | 36 % — too crowded |
+
+Two things move range, and this project previously used the short end of both.
+
+**Spreading factor.** SF7 is the *fastest and shortest-range* setting LoRa has.
+Every step up is +2.5 dB of receiver sensitivity and double the airtime.
+
+**Sub-band.** ETSI splits 868 MHz into bands with different limits. `g1`
+(868.0–868.6) allows 14 dBm and 1 % duty cycle; `g3` (869.4–869.65) allows
+27 dBm and **10 %**. The SX1262 caps at 22 dBm, so moving to g3 is +8 dB and
+ten times the airtime budget. It is the same band Meshtastic uses for its EU
+region, for the same reasons.
+
+Pick `EPIC` only for a handful of people spread across a city. The limit that
+bites first is not the law, it is the shared channel: a CAD-gated ALOHA channel
+starts losing frames to collisions above roughly a third occupancy, and twenty
+devices on `EPIC` would sit at 36 %. Range and capacity are the same budget
+spent twice.
+
+Every link-layer timeout is derived from the profile's airtime rather than
+hardcoded, so changing the profile re-times the whole stack. `make profiles` in
+`test/` builds and runs the suite against all three.
+
+### Range in practice
+
+Firmware is only half of it. Before changing the profile, check:
+
+- **The antenna.** The stock wire antenna is the single biggest variable. It
+  must be connected before powering on — transmitting into an open connector
+  can damage the radio — and a proper 868 MHz half-wave whip is worth more than
+  a spreading factor step.
+- **Height and body.** A device in a trouser pocket is being shielded by a bag
+  of salt water. Ten metres of elevation beats almost anything you can change
+  in software.
+- **Line of sight.** The 2–15 km figures are open ground or rooftop to rooftop.
+  In a city at street level, expect hundreds of metres at `FAST` and something
+  over a kilometre at `LONG`.
+
+All traffic runs at **BW 125 kHz — CR 4/5 — sync 0x12**, with frequency, spreading factor and power set by the profile. Small packets; devices are never quiet for long.
 
 | Packet | Type | Purpose |
 |--------|------|---------|
@@ -376,9 +437,11 @@ All traffic runs at **868 MHz — SF7 — BW 125 kHz — CR 4/5 — sync 0x12**.
 
 All of it is defined in `cypher32_packets.h`.
 
-Beacons go out every 12–18 seconds while you're discovering, easing to 25–35
-seconds once the neighbourhood is known. The interval is jittered — a fixed
-cadence lets two devices lock into phase and collide on every single beacon.
+Beacons go out at roughly half the steady interval while you're discovering,
+easing off once the neighbourhood is known — 25–35 seconds on `FAST`, longer on
+the slower profiles because a beacon at SF11 is thirteen times the airtime of
+one at SF7. The interval is jittered: a fixed cadence lets two devices lock into
+phase and collide on every single beacon.
 
 Every unicast carries a sequence number and is acknowledged. Unacknowledged
 frames are retried up to four times before the portal reports `NO RESPONSE` —
@@ -420,6 +483,11 @@ neighbour who can reach them and delivered when those two are next in range —
 it travels in somebody's pocket, not over the air. The portal shows what is
 waiting and what you are carrying for other people. A message is carried at
 most once, so it can never circle; undelivered mail expires after half an hour.
+
+When it arrives it says who brought it. The Inbox marks a carried message
+`via <name>`, and the device's message page reads `MAIL BlazeWorm via
+VoidShade`. Delivering somebody's post identifies the courier the same way
+writing to you does — a codename, nothing more, and no recon bonus with it.
 
 Carrying somebody's mail is worth a line in your log and nothing else. There is
 no XP in it, deliberately: the moment relaying pays, the best move is to leave

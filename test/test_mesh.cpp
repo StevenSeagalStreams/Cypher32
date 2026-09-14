@@ -354,6 +354,124 @@ int main() {
     saveDev(1);
   }
 
+  // ── the message log remembers who carried what ──
+  {
+    printf("message log\n");
+    for (int i = 0; i < NODES; i++) initDev(i, "BLACK");
+    air.clear(); chain(); g_millis = 1000;
+    loadDev(0);
+    msgLogCount = 0; msgLogNext = 0;
+
+    // A direct message and a carried one, through the real RX path.
+    PktMsg m;
+    fillHdr(&m.hdr, PKT_MSG, myChipID32);
+    m.hdr.from_id = B; m.hdr.seq = 40;
+    strncpy(m.text, "in person", 32); m.text[32] = '\0';
+    loraHandlePacket((uint8_t*)&m, sizeof(m));
+
+    PktMail p;
+    fillHdr(&p.hdr, PKT_MAIL, myChipID32);
+    p.hdr.from_id = B; p.hdr.seq = 41;          // B is the courier
+    p.final_id = myChipID32; p.origin_id = D;   // D wrote it
+    p.carried = 0;
+    strncpy(p.text, "from far away", MAIL_TEXT_MAX); p.text[MAIL_TEXT_MAX] = '\0';
+    loraHandlePacket((uint8_t*)&p, sizeof(p));
+
+    CHECK(msgLogCount == 2, "both messages are logged");
+    CHECK(msgLogAt(0) != nullptr && msgLogAt(1) != nullptr, "and both are readable");
+    const MsgLogEntry* newest = msgLogAt(0);
+    CHECK(newest && newest->from == D, "the carried one is credited to its author");
+    CHECK(newest && newest->via == B,  "and names the player who carried it");
+    const MsgLogEntry* older = msgLogAt(1);
+    CHECK(older && older->from == B,   "the direct one is from whoever sent it");
+    CHECK(older && older->via == 0,    "and has no carrier");
+    CHECK(lastMsgVia == B, "the e-ink page can name the carrier too");
+
+
+
+    // Mail the author delivers in person is not "carried" — the sender and the
+    // author are the same device, and labelling it "via themselves" would be
+    // both wrong and confusing on the page that reports the route.
+    PktMail own;
+    fillHdr(&own.hdr, PKT_MAIL, myChipID32);
+    own.hdr.from_id = C; own.hdr.seq = 42;
+    own.final_id = myChipID32; own.origin_id = C;   // author IS the sender
+    own.carried = 0;
+    strncpy(own.text, "delivered myself", MAIL_TEXT_MAX); own.text[MAIL_TEXT_MAX] = '\0';
+    loraHandlePacket((uint8_t*)&own, sizeof(own));
+    CHECK(msgLogAt(0) && msgLogAt(0)->via == 0,
+          "mail handed over by its own author records no carrier");
+    CHECK(lastMsgVia == 0, "and the page shows no route for it");
+
+    // Two from the same sender must both survive — the per-node inbox held
+    // one message per node and simply overwrote the first.
+    for (int i = 0; i < 2; i++) {
+      PktMsg q; fillHdr(&q.hdr, PKT_MSG, myChipID32);
+      q.hdr.from_id = B; q.hdr.seq = (uint8_t)(50 + i);
+      snprintf(q.text, sizeof q.text, "same sender %d", i);
+      loraHandlePacket((uint8_t*)&q, sizeof(q));
+    }
+    CHECK(msgLogCount == 5, "two messages from one sender are both kept");
+    // Guarded: a regression that stops logging leaves these null, and a test
+    // that segfaults reports nothing at all rather than naming what broke.
+    CHECK(msgLogAt(0) && String(msgLogAt(0)->text) == "same sender 1", "newest first");
+    CHECK(msgLogAt(1) && String(msgLogAt(1)->text) == "same sender 0",
+          "and the older one survives");
+
+    // It is a ring: the eleventh must push out the first, not overflow.
+    for (int i = 0; i < MSG_LOG_SIZE + 5; i++) {
+      PktMsg q; fillHdr(&q.hdr, PKT_MSG, myChipID32);
+      q.hdr.from_id = C; q.hdr.seq = (uint8_t)(80 + i);
+      snprintf(q.text, sizeof q.text, "flood %d", i);
+      loraHandlePacket((uint8_t*)&q, sizeof(q));
+    }
+    CHECK(msgLogCount == MSG_LOG_SIZE, "the log holds exactly ten");
+    CHECK(msgLogAt(0) && String(msgLogAt(0)->text) == "flood " + String(MSG_LOG_SIZE + 4),
+          "the newest is kept");
+    CHECK(msgLogAt(MSG_LOG_SIZE) == nullptr, "and reading past the end is refused");
+    saveDev(0);
+  }
+
+  // ── delivering somebody's post is an introduction ──
+  // A route that reads "via UNKNOWN-0002" tells you nothing about who to
+  // thank. Carrying mail identifies the carrier the same way writing to you
+  // or attacking you does — free codename, no odds bonus.
+  //
+  // In its own block on purpose: the courier must not have introduced itself
+  // some other way first. The earlier version of this test used a node that
+  // had already sent a direct message, so it passed with the rule deleted.
+  {
+    printf("the courier introduces itself\n");
+    for (int i = 0; i < NODES; i++) initDev(i, "BLACK");
+    air.clear(); chain(); g_millis = 1000;
+    loadDev(0);
+    knownCount = 0; memset(knownNodes, 0, sizeof(knownNodes));
+    msgLogCount = 0; msgLogNext = 0;
+
+    PktMail p;
+    fillHdr(&p.hdr, PKT_MAIL, myChipID32);
+    p.hdr.from_id = C; p.hdr.seq = 90;          // C carries it, and has said
+    p.final_id = myChipID32; p.origin_id = D;   // nothing to us before now
+    p.carried = 0;
+    strncpy(p.text, "hand delivered", MAIL_TEXT_MAX); p.text[MAIL_TEXT_MAX] = '\0';
+    loraHandlePacket((uint8_t*)&p, sizeof(p));
+
+    KnownNode* carrier = findNode(C);
+    CHECK(carrier != nullptr, "the courier is a direct contact — we heard them");
+    CHECK(carrier && reconKnows(carrier, RECON_T_NAME),
+          "and is identified by having made the delivery");
+    CHECK(carrier && carrier->recon_score == 0,
+          "but earns no recon score from it — a name is not an odds bonus");
+    CHECK(carrier && !reconKnows(carrier, RECON_T_FACTION),
+          "and nothing beyond a name is handed over");
+
+    // The AUTHOR is not introduced by this. They were not here.
+    KnownNode* author = findNode(D);
+    CHECK(author == nullptr || !reconKnows(author, RECON_T_NAME),
+          "the author, who was never in range, gets no such favour");
+    saveDev(0);
+  }
+
   // ── airtime: the reason this design exists ──
   {
     printf("airtime\n");
@@ -372,7 +490,12 @@ int main() {
     printf("  four nodes idle, extrapolated to the hour: %.3f %% duty\n", pct);
     CHECK(pct > 0.05f,          "the devices are actually transmitting");
     CHECK(pct < DUTY_LIMIT_PCT, "steady-state duty stays under the firmware cap");
-    CHECK(pct < 1.0f,           "and under the EU 868 g1 legal limit");
+    // Against the band this profile actually transmits in, not against g1 —
+    // LONG and EPIC sit in g3, where the legal ceiling is ten times higher.
+    CHECK(pct < LORA_DUTY_LEGAL_PCT,
+          "and under the legal ceiling for the band the profile uses");
+    // The limit that bites first is the shared channel, not the regulator.
+    printf("  aggregate at 20 nodes would be %.1f %% of the channel\n", pct * 20.0f);
     // The echo is a fixed cost per node per interval, so it does not grow with
     // the size of the room. Flooding would have: 20 nodes x 51.5 ms per beacon
     // interval is 3.43 %, which is why none of this rebroadcasts anything.

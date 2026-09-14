@@ -35,6 +35,15 @@ const STATE = {
       via: "AshVector", viaId: "beef0005", reachable: true, ageMs: 88000 },
   ],
   mail: { pending: 1, carried: 2, delivered: 4, handedOff: 3, expired: 0 },
+  // A believable inbox: some in person, some carried, one from a player who
+  // has since walked out of range entirely.
+  msgs: [
+    { from: "VoidShell",  fromId: "beef0001", via: "",          text: "north gate in ten",  ageMs: 62000 },
+    { from: "GrimPulse",  fromId: "cafe0008", via: "AshVector", text: "we are by the river", ageMs: 240000 },
+    { from: "AshVector",  fromId: "beef0005", via: "",          text: "who has the token?",  ageMs: 600000 },
+    { from: "UNKNOWN-0007", fromId: "cafe0007", via: "VoidShell", text: "watch out for RED",  ageMs: 1500000 },
+    { from: "NullGate",   fromId: "beef0002", via: "",          text: "firewall is up",      ageMs: 2700000 },
+  ],
   nodes: [
     { id: "beef0001", name: "VoidShell", level: 9, faction: "W", avgRssi: -55,
       bars: 4, proximity: "VERY CLOSE", status: "ACTIVE", ageMs: 4200, recon: 1,

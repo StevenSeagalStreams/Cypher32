@@ -12,7 +12,8 @@ const S1={configured:true,name:"GhostByte",faction:"BLACK",id:"a1b2c3d4",version
   {id:"beef0002",name:"NullGate",level:3,faction:"R",avgRssi:-98,bars:2,
    proximity:"DISTANT",status:"FADING",ageMs:130000,recon:0,hackWon:true,
    intel:6,pwned:false,brute:-1,stealth:-1,firewall:-1,reconMax:10,
-   cooldownMs:511000000,unread:false,msg:""}]};
+   cooldownMs:511000000,unread:false,msg:""}],
+ msgs:[{from:"VoidCrypt",fromId:"beef0001",via:"",text:"north gate <now>",ageMs:4200}]};
 // An unidentified contact: everything the device refuses to hand over yet.
 const ANON={id:"beef0003",name:"UNKNOWN-0003",level:0,faction:"?",avgRssi:-70,
  bars:3,proximity:"NEARBY",status:"ACTIVE",ageMs:1000,recon:0,hackWon:false,
@@ -28,6 +29,8 @@ ck(el("hfac").className==="pill fB","faction pill class");
 ck(el("hname").textContent==="GhostByte","name shown");
 ck((el("mto").innerHTML.match(/<option/g)||[]).length===2,"2 message targets");
 ck((el("inbox").innerHTML.match(/class=\"msg\"/g)||[]).length===1,"1 inbox entry");
+ck(el("inbox").innerHTML.includes("VoidCrypt"),"the sender is named");
+ck(!el("inbox").innerHTML.includes("via"),"a direct message is not labelled as carried");
 ck(!el("inbox").innerHTML.includes("<now>"),"node text escaped (no XSS)");
 ck(el("inbox").innerHTML.includes("&lt;now&gt;"),"escaped form present");
 ck(el("nodelist").innerHTML.includes("OWNED"),"7-day lock labelled OWNED");
@@ -461,6 +464,50 @@ ck(sfxOn === true && lsGet("sfx") === "1", "and switched back on");
 __audio.started = 0;
 sfxTest();
 ck(__audio.started === 6, "HEAR IT plays the cue on demand");
+
+// ── the message log: ten deep, newest first, route shown ──
+// The inbox used to be one message per node, read off the radar. That lost the
+// older of two messages from the same person, and lost all of them when that
+// person aged out of the node table — which happens a few minutes after they
+// walk away, exactly when you would want to read them again.
+const MANY = [];
+for (let i = 0; i < 10; i++)
+  MANY.push({from:"Sender"+i, fromId:"beef00"+i, via: i%2 ? "IronGate" : "",
+             text:"message "+i, ageMs: i*60000});
+S = {...S1, msgs: MANY}; render();
+ck((el("inbox").innerHTML.match(/class="msg"/g)||[]).length===10,
+   "all ten messages are listed, not one per contact");
+ck(el("mcount2").textContent.includes("10"), "and the count says how many");
+const first = el("inbox").innerHTML.indexOf("message 0");
+const last  = el("inbox").innerHTML.indexOf("message 9");
+ck(first >= 0 && last > first, "newest first");
+
+// The route is the thing that was missing: a carried message has to say who
+// carried it, or the courier hop is invisible to the person receiving it.
+ck((el("inbox").innerHTML.match(/via IronGate/g)||[]).length===5,
+   "every carried message names the player who carried it");
+ck(el("inbox").innerHTML.includes('class="viab"'),
+   "and is visually marked as having taken a route");
+const direct = el("inbox").innerHTML.split('<div class="msg">')[1] || "";
+ck(!direct.includes("via"), "a direct message carries no route label");
+
+// Two messages from the SAME person must both survive — this is the case the
+// per-node inbox could not represent at all.
+S = {...S1, msgs:[{from:"VoidCrypt",fromId:"beef0001",via:"",text:"second",ageMs:1000},
+                  {from:"VoidCrypt",fromId:"beef0001",via:"",text:"first",ageMs:90000}]};
+render();
+ck((el("inbox").innerHTML.match(/class="msg"/g)||[]).length===2,
+   "two messages from one sender are both kept");
+ck(el("inbox").innerHTML.includes("second") && el("inbox").innerHTML.includes("first"),
+   "and both are readable");
+
+// A sender who has walked out of range still has their messages.
+S = {...S1, nodes:[], msgs:[{from:"GhostWire",fromId:"beef0099",via:"IronGate",
+                            text:"still here",ageMs:400000}]};
+render();
+ck(el("inbox").innerHTML.includes("still here"),
+   "a message outlives its sender leaving the node table");
+ck(el("inbox").innerHTML.includes("GhostWire"), "and still names them");
 
 // ── echoes: presence past direct range, and nothing more ──
 const ECHO = {id:"cafe0009", name:"UNKNOWN-0009", pwned:false,

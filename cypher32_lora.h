@@ -40,11 +40,26 @@
 #define TXQ_SIZE            8      // outbound frame queue depth
 #define SEEN_RING_SIZE      16     // duplicate-suppression history (T1.1)
 #define TX_MAX_TRIES        4      // total attempts per reliable frame (T1.2)
-#define TX_RETRY_BASE_MS    400    // + random(0,300) jitter
-#define TX_RETRY_JITTER_MS  300
-#define REPLY_DELAY_MIN_MS  60     // deferred reply window (T1.3)
-#define REPLY_DELAY_JIT_MS  60
-#define TX_HARD_TIMEOUT_MS  500    // force recovery if TxDone never fires (T1.4)
+
+// ── Timeouts derived from airtime, not from one spreading factor ──
+// These were all constants tuned for SF7. At SF9 the largest frame takes
+// 390 ms and at SF10 it takes 698 ms, so a 500 ms "recovery" timeout would
+// abort a perfectly healthy transmission part-way through, and a 400 ms first
+// retry would fire before any reply could physically arrive. Every one of them
+// is now a multiple of LORA_MAX_TOA_MS, which the profile computes at compile
+// time — change LORA_PROFILE and the whole link layer re-times itself.
+//
+// A round trip is: our frame out, the peer's deferred-reply window, their
+// frame back, plus CAD backoff at both ends.
+#define REPLY_DELAY_MIN_MS  (LORA_MAX_TOA_MS / 2)     // deferred reply (T1.3)
+#define REPLY_DELAY_JIT_MS  (LORA_MAX_TOA_MS / 2)
+constexpr uint32_t LORA_RTT_MS = 2 * LORA_MAX_TOA_MS + REPLY_DELAY_MIN_MS +
+                                 REPLY_DELAY_JIT_MS + 250;
+#define TX_RETRY_BASE_MS    ((int)LORA_RTT_MS)
+#define TX_RETRY_JITTER_MS  ((int)(LORA_RTT_MS / 2))
+// Twice the longest frame plus slack: a transmission that has genuinely hung
+// is unmistakable, and one that is merely slow is left alone.
+#define TX_HARD_TIMEOUT_MS  ((int)(2 * LORA_MAX_TOA_MS + 200))
 #define CAD_MAX_TRIES       5      // then transmit anyway (T1.5)
 #define CAD_BACKOFF_MIN_MS  20
 #define CAD_BACKOFF_JIT_MS  100
@@ -55,16 +70,18 @@
 // 12–18 s for the first few minutes after boot and whenever a new neighbour
 // appears, so joining a group is fast without raising average airtime.
 // For the T0.4 bench test, drop the steady pair to 5000 / 5000.
-#define LORA_BEACON_MIN_MS       25000
-#define LORA_BEACON_MAX_MS       35000
-#define LORA_BEACON_FAST_MIN_MS  12000
-#define LORA_BEACON_FAST_MAX_MS  18000
+// LORA_BEACON_MIN_MS / MAX_MS come from the profile in cypher32_packets.h —
+// a beacon at SF11 is thirteen times the airtime of one at SF7, so the cadence
+// has to move with it or twenty devices saturate the channel between them.
+// Discovery runs at roughly half the steady interval.
+#define LORA_BEACON_FAST_MIN_MS  (LORA_BEACON_MIN_MS / 2)
+#define LORA_BEACON_FAST_MAX_MS  (LORA_BEACON_MAX_MS / 2)
 #define BEACON_FAST_WINDOW_MS   180000   // how long "fast" lasts (3 min)
 
 // EU 868 g1 duty cycle (T2.5). Legal limit is 1%; we soft-cap below it and
 // defer deferrable traffic above the cap so a retry storm cannot push us over.
 #define DUTY_BUCKETS         60          // one bucket per minute, rolling hour
-#define DUTY_LIMIT_PCT       0.8f
+#define DUTY_LIMIT_PCT       LORA_DUTY_SELF_PCT   // set by the profile
 #define NODE_PRUNE_MS        10000UL     // how often to age out nodes (T2.3)
 
 // Packet signing (T4.1). A 4-byte truncated HMAC-SHA256 tag is appended to
@@ -147,6 +164,44 @@ uint32_t  lastMsgFrom  = 0;
 String    lastMsgText  = "";
 uint32_t  lastMsgAt    = 0;
 bool      lastMsgCarried = false;   // arrived as mail, in somebody's pocket
+uint32_t  lastMsgVia   = 0;         // ...and who was carrying it
+
+// ── the last ten things anyone said to you ─────────────────────────────────
+// The globals above hold exactly one message, and KnownNode.msg_inbox holds
+// one per sender with no timestamp — so it cannot be ordered, and pruneNodes()
+// deletes it a few minutes after that person walks away, which is precisely
+// when you would want to read it again. Two people writing to you in quick
+// succession meant losing the first.
+//
+// RAM only, like the event log and for the same reason: NVS writes are what
+// wears out on this board, and persisting on inbound message would let anyone
+// in radio range drive flash wear by sending you text.
+#define MSG_LOG_SIZE 10
+struct MsgLogEntry {
+  uint32_t from;                    // who wrote it
+  uint32_t via;                     // who carried it; 0 = straight from them
+  uint32_t at;
+  char     text[MAIL_TEXT_MAX + 1];
+};
+MsgLogEntry msgLog[MSG_LOG_SIZE];
+uint8_t     msgLogCount = 0;        // 0..MSG_LOG_SIZE
+uint8_t     msgLogNext  = 0;        // write cursor
+
+void msgLogAdd(uint32_t from, uint32_t via, const char* text) {
+  MsgLogEntry& e = msgLog[msgLogNext];
+  e.from = from;
+  e.via  = (via == from) ? 0 : via;   // carried by its own author is not carried
+  e.at   = millis();
+  strncpy(e.text, text, MAIL_TEXT_MAX); e.text[MAIL_TEXT_MAX] = '\0';
+  msgLogNext = (uint8_t)((msgLogNext + 1) % MSG_LOG_SIZE);
+  if (msgLogCount < MSG_LOG_SIZE) msgLogCount++;
+}
+// Newest first. i = 0 is the most recent.
+const MsgLogEntry* msgLogAt(int i) {
+  if (i < 0 || i >= (int)msgLogCount) return nullptr;
+  int idx = (msgLogNext - 1 - i + MSG_LOG_SIZE * 2) % MSG_LOG_SIZE;
+  return &msgLog[idx];
+}
 uint32_t  lastSentTo   = 0;
 String    lastSentText = "";
 uint32_t  lastSentAt   = 0;
@@ -215,7 +270,12 @@ bool      hackVerdictLate     = false;   // arrived after the slot gave up
 #define RECON_PROBE_WAIT   1
 #define RECON_PROBE_READY  2
 #define RECON_PROBE_FAILED 3
-#define RECON_PROBE_MS     9000UL    // give up on a silent target
+// Give up on a silent target — but only after a complete reliable exchange has
+// had every one of its retries, in both directions. Hardcoded at 9 s this was
+// generous at SF7 and too short at SF9, where it would abandon a target that
+// was answering perfectly well.
+#define RECON_PROBE_MS \
+  ((unsigned long)(2UL * TX_MAX_TRIES * (TX_RETRY_BASE_MS + TX_RETRY_JITTER_MS) + 1500UL))
 
 struct ReconProbe {
   uint32_t      target;
@@ -862,7 +922,7 @@ static void serviceEcho() {
 //  reason to move rather than a reason to sit still.
 #define MAIL_SLOTS        8
 #define MAIL_TTL_MS       1800000UL   // half an hour, then it never arrives
-#define MAIL_RETRY_MS     15000UL     // how often one item may try again
+#define MAIL_RETRY_MS     (RECON_PROBE_MS + 5000UL)  // one item may try again
 #define MAIL_MAX_TRIES    12
 
 struct MailItem {
@@ -1254,6 +1314,8 @@ void loraHandlePacket(uint8_t* buf, int len) {
         lastMsgText = String(p->text);
         lastMsgAt   = millis();
         lastMsgCarried = false;
+        lastMsgVia     = 0;
+        msgLogAdd(p->hdr.from_id, 0, p->text);
         reconAtLeast(n, RECON_T_NAME);   // they signed the message by sending it
         pendingMsg = String(p->text); pendingMsgFrom = chipIdStr(p->hdr.from_id);
       }
@@ -1299,9 +1361,16 @@ void loraHandlePacket(uint8_t* buf, int len) {
         lastMsgText = String(body);
         lastMsgAt   = millis();
         lastMsgCarried = (p->hdr.from_id != p->origin_id);
+        lastMsgVia     = lastMsgCarried ? p->hdr.from_id : 0;
+        msgLogAdd(p->origin_id, p->hdr.from_id, body);
         pendingMsg     = String(body);
         pendingMsgFrom = chipIdStr(p->origin_id);
         pendingMsgRelayed = (p->hdr.from_id != p->origin_id);
+        // Carrying somebody's post to you is an introduction, the same way
+        // writing to you or attacking you is — and a route that reads
+        // "via UNKNOWN-0002" tells the player nothing about who to thank.
+        // Free codename, no odds bonus; that is what reconAtLeast is for.
+        if (pendingMsgRelayed) reconAtLeast(findNode(p->hdr.from_id), RECON_T_NAME);
         LORA_LOG("MAIL arrived from %08lx%s",
                  (unsigned long)p->origin_id,
                  pendingMsgRelayed ? " (carried)" : "");

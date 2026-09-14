@@ -1615,8 +1615,27 @@ void displayLastMsg() {
   }
 
   if (lastMsgAt) {
-    printAt(MARGIN_X, 16, String(lastMsgCarried ? "MAIL " : "FROM ") +
-                          nodeDisplayName(lastMsgFrom));
+    // "who it came through" belongs next to "who it is from" — that is the
+    // question a carried message raises the moment you read it.
+    //
+    // Both names can be UNKNOWN-xxxx, which is twelve characters each, and
+    // "MAIL UNKNOWN-1234 via UNKNOWN-5678" plus the age on the right is two
+    // pixels wider than the line. So the route is trimmed rather than allowed
+    // to run under the timestamp.
+    String head = String(lastMsgCarried ? "MAIL " : "FROM ") +
+                  nodeDisplayName(lastMsgFrom);
+    if (lastMsgVia) {
+      String age  = agoStr(lastMsgAt);
+      int budget  = (DISP_W - 2 * MARGIN_X) / FONT_W - (int)age.length() - 1;
+      String via  = " via " + nodeDisplayName(lastMsgVia);
+      if ((int)(head.length() + via.length()) > budget) {
+        int room = budget - (int)head.length() - 5;      // 5 = " via "
+        via = (room > 2) ? " via " + nodeDisplayName(lastMsgVia).substring(0, room)
+                         : "";
+      }
+      head += via;
+    }
+    printAt(MARGIN_X, 16, head);
     printRight(DISP_W - MARGIN_X, 16, agoStr(lastMsgAt));
     drawSep(26);
     char lines[3][21];
@@ -1890,7 +1909,7 @@ String buildStateJson() {
   // reserve() up front turns that back into a linear append.
   String j;
   j.reserve(768 + (size_t)knownCount * 512 + (size_t)eventCount * 96 +
-           (size_t)echoCount * 128);
+           (size_t)echoCount * 128 + (size_t)msgLogCount * 160);
   j += "{";
   j += "\"configured\":" + String(configured ? "true" : "false") + ",";
   j += "\"name\":\""     + jesc(myName) + "\",";
@@ -2047,6 +2066,23 @@ String buildStateJson() {
   }
   j += "],";
 
+  j += "\"probeMs\":" + String((unsigned long)RECON_PROBE_MS) + ",";
+
+  // Everything anyone has said to you, newest first, with the route it took.
+  // Separate from the per-node inbox, which keeps one message per sender and
+  // loses it when that sender ages out of the table.
+  j += "\"msgs\":[";
+  for (int i = 0; i < (int)msgLogCount; i++) {
+    const MsgLogEntry* e = msgLogAt(i);
+    if (!e) break;
+    if (i) j += ",";
+    j += "{\"from\":\""  + jesc(nodeDisplayName(e->from)) + "\",";
+    j += "\"fromId\":\"" + chipIdStr(e->from) + "\",";
+    j += "\"via\":\""    + (e->via ? jesc(nodeDisplayName(e->via)) : String("")) + "\",";
+    j += "\"text\":\""   + jesc(String(e->text)) + "\",";
+    j += "\"ageMs\":"     + String(ageMs(e->at)) + "}";
+  }
+  j += "],";
   j += "\"mail\":{\"pending\":" + String(mailPending()) +
        ",\"carried\":"           + String(mailCarriedCount()) +
        ",\"delivered\":"         + String(loraMailDelivered) +
@@ -2390,7 +2426,11 @@ void handleApiPing() {
   if (!loraReady || target == 0) { apiFail(503, "Radio offline"); return; }
   unsigned long t0 = millis();
   loraSendPing(target);
-  while (loraActionPending() && (uint32_t)(millis() - t0) < 3500) {
+  // Derived, not 3500: one round trip at SF9 is 1.4 s, so a fixed 3.5 s cap
+  // reported ok:false on links that were answering. Two full attempts plus
+  // slack, and still bounded so the request handler cannot hang the portal.
+  const uint32_t PING_WAIT_MS = 2 * (TX_RETRY_BASE_MS + TX_RETRY_JITTER_MS) + 500;
+  while (loraActionPending() && (uint32_t)(millis() - t0) < PING_WAIT_MS) {
     loraTick(); delay(5); yield();
   }
   bool ok = (loraActionState == LA_SUCCESS);

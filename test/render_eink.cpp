@@ -89,10 +89,28 @@ int main(int argc, char** argv) {
                              mailQueue(0xCAFE0001, myChipID32, "see you at the gate", false);
                              displayLastMsg();
                              memset(mailbox, 0, sizeof(mailbox)); }},
+    {"page-mail-wide",   []{ lastMsgFrom = 0xCAFE0001; lastMsgAt = g_millis - 240000;
+                             lastMsgText = "two unnamed nodes on one line";
+                             lastMsgCarried = true; lastMsgVia = 0xBEEF0002;
+                             lastSentAt = 0;
+                             // Neither reconned, so both render as UNKNOWN-xxxx
+                             // — the widest this header line can ever get.
+                             int keep = knownCount;
+                             { KnownNode* a = findOrAddNode(0xCAFE0001); a->intel = 0;
+                               KnownNode* b = findOrAddNode(0xBEEF0002); b->intel = 0; }
+                             displayLastMsg();
+                             lastMsgCarried = false; lastMsgVia = 0;
+                             // Drop only what this fixture added. Wiping the
+                             // whole table changed the discovery screens that
+                             // render after it, two fixtures further down.
+                             while (knownCount > keep)
+                               memset(&knownNodes[--knownCount], 0, sizeof(KnownNode)); }},
     {"page-mail-in",     []{ lastMsgFrom = 0xCAFE0001; lastMsgAt = g_millis - 240000;
                              lastMsgText = "came the long way round";
-                             lastMsgCarried = true; lastSentAt = 0;
-                             displayLastMsg(); lastMsgCarried = false; }},
+                             lastMsgCarried = true; lastMsgVia = 0xBEEF0002;
+                             lastSentAt = 0;
+                             displayLastMsg();
+                             lastMsgCarried = false; lastMsgVia = 0; }},
     {"newnode",     []{ displayNewNode(0xBEEF0001, 9, 'W'); }},
     {"newnode-unknown", []{ displayNewNode(0xBEEF0002, 3, 'R'); }},
     {"hack-win",    []{ displayHackSuccess("beef0001", 45, "Clean in, clean out."); }},

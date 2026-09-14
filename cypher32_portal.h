@@ -81,6 +81,8 @@ textarea{min-height:64px;resize:none}
 .cen .t{flex:1;height:12px;background:#0d1a12;border:1px solid #23402e;border-radius:3px;overflow:hidden}
 /* display:block or the width is ignored — a span is inline, and an inline
    box takes its width from its content, which here is nothing at all. */
+.viab{display:inline-block;padding:1px 5px;margin-left:4px;border-radius:4px;
+  border:1px dashed #2c3a4d;color:#7fd1a8;font-size:10px;letter-spacing:.04em}
 .echo{border:1px dashed #2c3a4d;border-radius:10px;padding:10px 12px;
   margin-bottom:8px;background:rgba(255,255,255,.015);opacity:.82}
 .echo b{font-weight:600;color:#9fb3c8}
@@ -355,7 +357,12 @@ textarea{min-height:64px;resize:none}
       <div class="card"><div class="ct">Courier bag</div>
         <div class="xs mut" id="mailstat">Nothing waiting</div>
       </div>
-      <div class="card"><div class="ct">Inbox</div><div id="inbox"></div></div>
+      <div class="card"><div class="row"><div class="ct">Inbox</div>
+        <span class="xs mut" id="mcount2"></span></div>
+        <div id="inbox"></div>
+        <p class="xs mut" style="margin-top:8px">The last ten messages anyone
+        sent you. One marked <span class="viab">via</span> was carried to you
+        by that player rather than arriving over the air directly.</p></div>
     </div>
 
     <!-- EVENT LOG -->
@@ -708,7 +715,12 @@ function seqLinkFailed(why){
 function seqAwaitProbe(tries,run){
   if(run!==seqRun)return;                                    // superseded
   if($("seqmodal").className.indexOf("hide")>=0)return;      // cancelled
-  if(tries>40){seqLinkFailed("No response — out of range?");return}
+  // The firmware reports how long it is prepared to wait for a target, and
+  // that figure moves with the range profile — a fixed 40 tries (10 s) was
+  // shorter than the radio's own timeout at anything past SF7, so the browser
+  // gave up on probes that were still perfectly alive. Poll a little past it.
+  var capMs=((S&&S.probeMs)||9000)+3000;
+  if(tries>Math.ceil(capMs/250)){seqLinkFailed("No response — out of range?");return}
   fetch("/api/state",{cache:"no-store"}).then(function(r){return r.json()})
     .then(function(j){
       S=j;
@@ -1142,10 +1154,17 @@ function render(){
     (m.pending?m.pending+" waiting to be delivered":"Nothing waiting")+
     (m.carried?" \u00b7 carrying "+m.carried+" for others":"")+
     (m.delivered?" \u00b7 "+m.delivered+" delivered":"");
-  var inbox=S.nodes.filter(function(n){return n.msg});
-  $("inbox").innerHTML=inbox.length?inbox.map(function(n){
-    return'<div class="msg"><div class="xs mut">'+esc(n.name)+
-      (n.unread?' <span class="dot"></span>':'')+'</div><div>'+esc(n.msg)+'</div></div>'
+  // The last ten, newest first, each showing the route it took. This used to
+  // be one message per node, pulled from the radar — so it lost the older of
+  // two messages from the same person, and lost all of them when that person
+  // aged out of the node table.
+  var ml=S.msgs||[];
+  $("mcount2").textContent=ml.length?ml.length+(ml.length===1?" message":" messages"):"";
+  $("inbox").innerHTML=ml.length?ml.map(function(m){
+    return'<div class="msg"><div class="row"><span class="xs mut"><b>'+esc(m.from)+'</b>'+
+      (m.via?' <span class="viab">via '+esc(m.via)+'</span>':'')+'</span>'+
+      '<span class="xs mut">'+fmtAge(m.ageMs)+'</span></div>'+
+      '<div>'+esc(m.text)+'</div></div>'
     }).join(""):'<div class="xs mut">No messages yet.</div>';
 
   var ev=S.events||[];

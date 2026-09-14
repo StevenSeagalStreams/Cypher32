@@ -59,10 +59,12 @@ public:
     return cadBusy ? RADIOLIB_LORA_DETECTED : RADIOLIB_CHANNEL_FREE;
   }
 
+  size_t   lastTxLen = 0;           // so the harness can model real airtime
   int startTransmit(uint8_t* buf, size_t len) {
     if (failTransmit) return -1;
     Frame f; f.data.assign(buf, buf + len); f.atMs = millis();
     sent.push_back(f);
+    lastTxLen = len;
     return RADIOLIB_ERR_NONE;
   }
   int finishTransmit() { return RADIOLIB_ERR_NONE; }
