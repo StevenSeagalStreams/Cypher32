@@ -55,9 +55,10 @@ Measured in simulation: recon completes 100% of the time up to 40% packet loss,
 NIST and RFC 4231 vectors.
 
 **This proves logic, not radios.** It says nothing about RadioLib behaviour, SPI
-timing, interrupt latency, or RF range, and the firmware has never been compiled
-for the target. **T0.4 and the field test protocol below remain required before
-any of this can be called working.**
+timing, interrupt latency, or RF range. CI now compiles every range profile for
+the ESP32-S3 on each push, so "it builds for the target" is no longer an open
+question — but building is not running. **T0.4 and the field test protocol below
+remain required before any of this can be called working.**
 
 ---
 
