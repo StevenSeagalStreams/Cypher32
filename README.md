@@ -59,6 +59,23 @@ Flash it. Power it. Pick a side. That's all it takes to enter the network.
 
 ### Step 1 — Flash the firmware
 
+**From your browser — no toolchain.** Open
+**[the installer page](https://stevenseagalstreams.github.io/Cypher32/)**, plug
+the board in over USB, pick a range profile and press one button.
+
+That needs the Web Serial API, which today means **Chrome, Edge or Opera on a
+desktop computer**. Firefox and Safari do not implement it, and neither does
+any phone or tablet browser — including Chrome on Android. The page says so
+before you get as far as the button.
+
+Every image there is built by GitHub Actions from the commit it names, and
+carries the **public default `LORA_KEY`** — so anyone who flashes from that
+page can hear anyone else who did. That is the point for a public game; for a
+private one, change the key and build it yourself.
+
+<details>
+<summary><b>Or build it yourself</b></summary>
+
 **Arduino IDE:**
 1. Install the **Heltec ESP32** board package via Boards Manager.
 2. Install these libraries via Library Manager:
@@ -70,9 +87,12 @@ Flash it. Power it. Pick a side. That's all it takes to enter the network.
 
 **PlatformIO:**
 ```
-pio run -t upload
+pio run -e long -t upload      # or -e fast / -e epic
 ```
-Dependencies are declared in `platformio.ini` and pulled automatically.
+Dependencies are declared in `platformio.ini` and pulled automatically. There
+is one environment per range profile; `long` is the default.
+
+</details>
 
 ---
 
@@ -599,19 +619,27 @@ cd test && make shots    # regenerate every image in docs/img
 |-------|--------------|
 | `lint` | Every ALL-CAPS constant in the sketch resolves to a `#define` |
 | `sketch` | **Compiles `cypher32.ino`** against host stubs in `test/stub/` |
-| `run` | Link layer (177 checks), a two-node radio simulation over a lossy channel (31), and the page button (32) |
+| `run` | Link layer (188 checks), a two-node radio simulation over a lossy channel (50), a four-node mesh (69), and the page button (32) |
+| `profiles` | The link and mesh suites rebuilt against **all three range profiles** |
 | `portal` | The real portal HTML against a DOM shim — render, the mini-game, the alert |
 | `layout` | The page in real Chromium at five phone sizes — nothing off-screen, nothing unreachable |
+| `flasher` | The browser installer page in real Chromium — the profile picker, the browser gate, a blocked CDN |
 | `qr` | The encoder against `python-qrcode`, then the result decoded by OpenCV |
 
-Two of those are worth spelling out, because there is **no ESP32 toolchain in
-this repository** and nothing else covers what they cover:
+**The firmware is compiled for the real chip in CI.** `.github/workflows/firmware.yml`
+builds all three range profiles with PlatformIO on every push, merges each into
+a single flashable image, and publishes the installer page. Until that existed,
+this firmware had never been built for an ESP32 at all.
 
-**`make sketch` builds the firmware.** `test/render_eink.cpp` includes
-`cypher32.ino` and links it against stubs for the display, Wi-Fi, NVS, the web
-server and the radio. It will not catch a bad pin mapping or a linker script
-problem, but it catches every typo, every changed signature and every missing
-declaration before the Arduino IDE does.
+Two of the host stages are worth spelling out, because they run where **no
+ESP32 toolchain is available** and nothing else covers what they cover:
+
+**`make sketch` builds the firmware against stubs.** `test/render_eink.cpp`
+includes `cypher32.ino` and links it against stubs for the display, Wi-Fi, NVS,
+the web server and the radio. It will not catch a bad pin mapping or a linker
+script problem — that is what the CI build is for — but it catches every typo,
+every changed signature and every missing declaration in a second, without
+waiting for a toolchain.
 
 **The e-ink screens are rendered, not photographed.** The same program runs the
 sketch's own `displayIdle()`, `displayNewNode()` and friends into a 250×122
