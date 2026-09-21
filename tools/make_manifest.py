@@ -40,10 +40,26 @@ def main() -> int:
     ap.add_argument("--page", default="web/index.html")
     ap.add_argument("--summary", default="",
                     help="also write a markdown table here (GITHUB_STEP_SUMMARY)")
+    ap.add_argument("--esptool", default="",
+                    help="esptool-js bundle.js to publish as site/esptool.js")
     args = ap.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
     shutil.copy(args.page, os.path.join(args.out, "index.html"))
+
+    # The board check imports this from our own origin rather than a CDN, so a
+    # blocked or slow third party cannot stop someone confirming what they are
+    # about to write to. Sanity-checked rather than trusted: copying the wrong
+    # file here would break the check with a module error and nothing else.
+    if args.esptool:
+        blob = open(args.esptool, "rb").read()
+        if len(blob) < 100_000 or b"ESPLoader" not in blob or b"Transport" not in blob:
+            print("%s does not look like the esptool-js bundle (%d bytes)"
+                  % (args.esptool, len(blob)), file=sys.stderr)
+            return 1
+        with open(os.path.join(args.out, "esptool.js"), "wb") as f:
+            f.write(blob)
+        print("  esptool.js %7d B" % len(blob))
 
     builds = []
     for profile in PROFILES:
@@ -96,6 +112,8 @@ def main() -> int:
     # A flasher that quietly serves a stale or missing binary is worse than one
     # that is plainly broken, so refuse to publish a half-assembled site.
     expected = ["index.html", "build-info.json"]
+    if args.esptool:
+        expected.append("esptool.js")
     for profile in PROFILES:
         expected += ["cypher32-%s.bin" % profile, "manifest-%s.json" % profile]
     for name in expected:

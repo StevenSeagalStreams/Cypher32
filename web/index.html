@@ -110,36 +110,57 @@
   </div>
 
   <div class="card">
-    <h2>2 &middot; Connect and install</h2>
-    <p class="xs mut" style="margin-bottom:6px">Make sure the antenna is
-    attached <b>before</b> you power the board — transmitting into an empty
+    <h2>2 &middot; Check the board</h2>
+    <p class="xs mut" style="margin-bottom:6px">Before anything is written, read
+    back what is actually on the other end of the cable. Nothing is flashed by
+    this step &mdash; it only asks the chip what it is.</p>
+    <p class="xs mut" style="margin-bottom:12px">Make sure the antenna is
+    attached <b>before</b> you power the board: transmitting into an empty
     connector can damage the radio.</p>
-    <esp-web-install-button id="installer" manifest="manifest-long.json">
-      <button slot="activate" style="width:100%;min-height:46px;padding:12px;
-        background:#123020;color:#8dffb4;border:1px solid #2c6b45;
-        border-radius:9px;font:inherit;font-weight:600;letter-spacing:.06em;
-        cursor:pointer">INSTALL CYPHER32</button>
-      <span slot="unsupported" class="xs" style="color:#ffb0b0">
-        This browser cannot flash devices &mdash; see above.</span>
-      <span slot="not-allowed" class="xs" style="color:#ffb0b0">
-        This page must be served over HTTPS to flash a device.</span>
-    </esp-web-install-button>
-    <p class="xs" id="cdnfail" hidden
-       style="margin-top:11px;color:#ffb0b0">The installer script could not be
-      loaded from the network. An ad blocker, a corporate proxy or an offline
-      machine will all do this. Reload with the blocker off, or download the
-      <code>.bin</code> from the
-      <a href="https://github.com/StevenSeagalStreams/Cypher32/actions">build
-      artifacts</a> and flash it with esptool.</p>
-    <p class="xs mut" style="margin-top:11px">Your browser will ask which
-    serial port to use. The Heltec board appears as a <code>CP210x</code> or
+
+    <button id="checkbtn" style="width:100%;min-height:46px;padding:12px;
+      background:#0d1a12;color:#8dffb4;border:1px solid #2c6b45;
+      border-radius:9px;font:inherit;font-weight:600;letter-spacing:.06em;
+      cursor:pointer">CHECK THIS BOARD</button>
+
+    <div id="checkresult" hidden style="margin-top:12px"></div>
+
+    <p class="xs mut" style="margin-top:11px">Your browser asks which serial
+    port to use. The board appears as a <code>CP210x</code> or
     <code>USB Serial</code> device. If nothing is listed, install the
     <a href="https://www.silabs.com/developer-tools/usb-to-uart-bridge-vcp-drivers">CP210x
-    driver</a> and reconnect.</p>
+    driver</a> and reconnect. You will be asked to pick the port twice &mdash;
+    once here, once to install &mdash; so choose the same one both times.</p>
+  </div>
+
+  <div class="card" id="installcard">
+    <h2>3 &middot; Install</h2>
+    <div id="installgate" class="xs mut">Check the board first. This is here so
+      nobody writes Cypher32 over something that was never meant to receive
+      it.</div>
+    <div id="installwrap" hidden>
+      <esp-web-install-button id="installer" manifest="manifest-long.json">
+        <button slot="activate" style="width:100%;min-height:46px;padding:12px;
+          background:#123020;color:#8dffb4;border:1px solid #2c6b45;
+          border-radius:9px;font:inherit;font-weight:600;letter-spacing:.06em;
+          cursor:pointer">INSTALL CYPHER32</button>
+        <span slot="unsupported" class="xs" style="color:#ffb0b0">
+          This browser cannot flash devices &mdash; see above.</span>
+        <span slot="not-allowed" class="xs" style="color:#ffb0b0">
+          This page must be served over HTTPS to flash a device.</span>
+      </esp-web-install-button>
+      <p class="xs" id="cdnfail" hidden
+         style="margin-top:11px;color:#ffb0b0">The installer script could not be
+        loaded from the network. An ad blocker, a corporate proxy or an offline
+        machine will all do this. Reload with the blocker off, or download the
+        <code>.bin</code> from the
+        <a href="https://github.com/StevenSeagalStreams/Cypher32/actions">build
+        artifacts</a> and flash it with esptool.</p>
+    </div>
   </div>
 
   <div class="card">
-    <h2>3 &middot; First boot</h2>
+    <h2>4 &middot; First boot</h2>
     <ol class="xs">
       <li>The screen shows a QR code and a Wi-Fi name like
           <code>C32_XXXX</code>.</li>
@@ -172,6 +193,90 @@
 <script type="module"
   src="https://unpkg.com/esp-web-tools@10.0.0/dist/web/install-button.js?module"></script>
 <script>
+  // ── What the board actually is ────────────────────────────────────────────
+  //
+  // Read as a decision table on purpose, and kept as a pure function so every
+  // branch can be tested without a board on the desk. Nothing here writes to
+  // the device; it only asks the ROM bootloader what it is.
+  //
+  // What this CAN establish: the chip family and the flash size. Both matter.
+  // The family is what makes the image executable at all, and the flash size
+  // is what makes it fit — Cypher32 is built against an 8 MB partition table,
+  // so a 4 MB ESP32-S3 would accept the image and then behave badly. That
+  // second one is worth having, because the installer itself only checks the
+  // family and would flash a 4 MB board without complaint.
+  //
+  // What this CANNOT establish: that the board is specifically a Wireless
+  // Paper. A Heltec WiFi LoRa 32 V3 is also an ESP32-S3 with 8 MB and would
+  // pass every check here. Nothing reachable over the serial bootloader
+  // distinguishes them — there is no board ID to read, and the MAC belongs to
+  // Espressif rather than to Heltec. So the wording below says "consistent
+  // with", never "confirmed", and the USB bridge is reported as corroboration
+  // rather than as proof.
+  var CP210X = { vendorId: 0x10c4, productId: 0xea60 };  // the Heltec bridge
+  var ESPRESSIF_VID = 0x303a;                            // native USB on an S3
+
+  function boardVerdict(info) {
+    var notes = [];
+    var chip = String(info.chip || "").toUpperCase();
+
+    if (!chip) {
+      return { level: "fail", headline: "Could not identify the chip",
+        detail: "The board answered, but did not say what it is. Unplug it, " +
+                "plug it back in and check again.", notes: notes };
+    }
+    if (chip.indexOf("ESP32-S3") === -1) {
+      return { level: "fail", headline: "This is not an ESP32-S3",
+        detail: "It reports \u201c" + info.chip + "\u201d. A Heltec Wireless " +
+                "Paper is an ESP32-S3, and Cypher32 will not run on anything " +
+                "else. Nothing has been written.", notes: notes };
+    }
+
+    var flash = String(info.flashSize || "").toUpperCase().replace(/\s+/g, "");
+    if (!flash) {
+      notes.push("Flash size could not be read, so it has not been checked.");
+    } else if (flash !== "8MB") {
+      return { level: "fail",
+        headline: "This board has " + info.flashSize + " of flash, not 8 MB",
+        detail: "Cypher32 is built against an 8 MB partition layout. This " +
+                "image would be written without complaint and then misbehave, " +
+                "which is exactly the mistake this check exists to catch.",
+        notes: notes };
+    }
+
+    // The bridge is corroboration, never the verdict on its own: it says which
+    // USB chip is in front of the ESP32, and plenty of unrelated boards use
+    // the same one. It can lower confidence, not raise or veto it.
+    var level = flash ? "ok" : "warn";
+    if (info.vendorId === CP210X.vendorId && info.productId === CP210X.productId) {
+      notes.push("Connected through a CP210x bridge, which is what the " +
+                 "Wireless Paper uses.");
+    } else if (info.vendorId === ESPRESSIF_VID) {
+      level = "warn";
+      notes.push("Connected through the ESP32\u2019s own USB rather than a " +
+                 "CP210x bridge. Fine in itself, but not how a Wireless Paper " +
+                 "normally appears \u2014 worth a second look at which board " +
+                 "this is.");
+    } else if (info.vendorId != null) {
+      level = "warn";
+      notes.push("Connected through an unfamiliar USB bridge (" +
+                 hex4(info.vendorId) + ":" + hex4(info.productId) + "). A " +
+                 "Wireless Paper normally appears as a CP210x.");
+    }
+
+    return { level: level,
+      headline: "ESP32-S3" + (flash ? " with " + flash : "") +
+                " \u2014 consistent with a Heltec Wireless Paper",
+      detail: "This is the right chip and the right flash size. It cannot " +
+              "prove the board is a Wireless Paper specifically: another " +
+              "ESP32-S3 with 8 MB, such as a Heltec WiFi LoRa 32 V3, would " +
+              "look identical from here.", notes: notes };
+  }
+  function hex4(n) {
+    return n == null ? "?" : "0x" + n.toString(16).padStart(4, "0");
+  }
+  window.boardVerdict = boardVerdict;   // the tests drive this directly
+
   // Web Serial is the whole dependency. Say so up front rather than letting
   // someone read three sections and then find the button inert.
   if (!("serial" in navigator)) document.getElementById("nosupport").hidden = false;
@@ -182,6 +287,105 @@
     if (!customElements.get("esp-web-install-button"))
       document.getElementById("cdnfail").hidden = false;
   }, 8000);
+
+  // ── the check itself ──────────────────────────────────────────────────────
+  // esptool.js is served from this origin, published alongside the binaries by
+  // CI, so the check does not depend on a CDN even though the install button
+  // still does. Imported on demand: 300 kB is not worth loading for someone
+  // who only came to read the page.
+  var checked = false;
+
+  function paintCheck(v) {
+    var box = document.getElementById("checkresult");
+    var colour = v.level === "fail" ? "#ff8080"
+               : v.level === "warn" ? "#e0c37a" : "#8dffb4";
+    var border = v.level === "fail" ? "#8a3030"
+               : v.level === "warn" ? "#8a6a30" : "#2c6b45";
+    box.hidden = false;
+    box.innerHTML =
+      '<div style="border:1px solid ' + border + ';border-radius:8px;padding:12px">' +
+      '<div style="color:' + colour + ';font-weight:600">' + esc(v.headline) + '</div>' +
+      (v.detail ? '<p class="xs mut" style="margin:7px 0 0">' + esc(v.detail) + '</p>' : '') +
+      (v.notes && v.notes.length
+        ? '<ul class="xs mut" style="margin:7px 0 0 16px;padding:0">' +
+          v.notes.map(function (n) { return '<li>' + esc(n) + '</li>'; }).join("") +
+          '</ul>'
+        : '') +
+      (v.facts ? '<p class="xs mut" style="margin:7px 0 0;opacity:.8">' +
+                 esc(v.facts) + '</p>' : '') +
+      '</div>';
+  }
+  function esc(t) {
+    return String(t == null ? "" : t).replace(/[&<>"]/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
+    });
+  }
+
+  function unlockInstall(why) {
+    checked = true;
+    document.getElementById("installgate").hidden = true;
+    document.getElementById("installwrap").hidden = false;
+    if (why) {
+      var g = document.getElementById("installgate");
+      g.hidden = false;
+      g.className = "xs";
+      g.style.color = "#e0c37a";
+      g.style.marginBottom = "10px";
+      g.textContent = why;
+    }
+  }
+
+  async function checkBoard() {
+    var btn = document.getElementById("checkbtn");
+    btn.disabled = true;
+    btn.textContent = "CHECKING\u2026";
+    var transport = null;
+    try {
+      var port = await navigator.serial.requestPort();
+      var usb = (port.getInfo && port.getInfo()) || {};
+
+      var mod = await import("./esptool.js");
+      transport = new mod.Transport(port, false);
+      var loader = new mod.ESPLoader({ transport: transport, baudrate: 115200,
+                                       romBaudrate: 115200 });
+      var description = await loader.main();
+      var flashSize = null;
+      try { flashSize = await loader.detectFlashSize(); } catch (e) { /* reported as unknown */ }
+
+      var v = boardVerdict({
+        chip: (loader.chip && loader.chip.CHIP_NAME) || description,
+        flashSize: flashSize,
+        vendorId: usb.usbVendorId, productId: usb.usbProductId,
+      });
+      v.facts = "Reported: " + description +
+                (flashSize ? ", " + flashSize + " flash" : "") +
+                ", USB " + hex4(usb.usbVendorId) + ":" + hex4(usb.usbProductId);
+      paintCheck(v);
+      if (v.level !== "fail") unlockInstall(null);
+    } catch (err) {
+      // Never fail closed. A cancelled picker, a port another tab is holding,
+      // a blocked import — none of those are evidence about the board, and a
+      // check that cannot run must not be the reason nobody can install.
+      var cancelled = err && (err.name === "NotFoundError" ||
+                              /No port selected/i.test(err.message || ""));
+      paintCheck({ level: cancelled ? "warn" : "warn",
+        headline: cancelled ? "No port chosen" : "The check could not run",
+        detail: cancelled
+          ? "Nothing was read and nothing was written."
+          : "The board could not be identified: " + (err && err.message || err) +
+            " This says nothing about the board itself \u2014 it may simply be " +
+            "in use by another tab or a serial monitor.",
+        notes: [] });
+      unlockInstall("The board was not identified. You can install anyway, but " +
+                    "check you have the right device selected.");
+    } finally {
+      if (transport) { try { await transport.disconnect(); } catch (e) {} }
+      btn.disabled = false;
+      btn.textContent = checked ? "CHECK AGAIN" : "CHECK THIS BOARD";
+    }
+  }
+  document.getElementById("checkbtn").addEventListener("click", checkBoard);
+  window.checkBoard = checkBoard;
 
   var installer = document.getElementById("installer");
   document.querySelectorAll('input[name=profile]').forEach(function (r) {

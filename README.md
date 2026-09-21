@@ -68,6 +68,25 @@ desktop computer**. Firefox and Safari do not implement it, and neither does
 any phone or tablet browser — including Chrome on Android. The page says so
 before you get as far as the button.
 
+**It checks the board before it writes anything.** Press *Check this board* and
+the page asks the chip what it is over the serial bootloader — nothing is
+flashed by that step. It confirms the chip family and the flash size, and the
+install button stays locked until it passes.
+
+Both of those matter. The family is what makes the image runnable at all; the
+flash size is what makes it fit, because Cypher32 is built against an 8 MB
+partition table and a 4 MB ESP32-S3 would accept the image and then misbehave.
+The installer itself only checks the family, so the size check is the one that
+catches that mistake.
+
+What it *cannot* do is prove the board is specifically a Wireless Paper — a
+Heltec WiFi LoRa 32 V3 is also an ESP32-S3 with 8 MB and looks identical over
+the bootloader. The page says "consistent with" rather than "confirmed", and
+reports the USB bridge as corroboration rather than proof. If the check cannot
+run at all — an unreachable library, a port held by a serial monitor — it says
+so and lets you install anyway, because a check that fails is not evidence
+about your board.
+
 Every image there is built by GitHub Actions from the commit it names, and
 carries the **public default `LORA_KEY`** — so anyone who flashes from that
 page can hear anyone else who did. That is the point for a public game; for a

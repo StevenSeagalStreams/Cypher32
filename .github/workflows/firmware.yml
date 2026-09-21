@@ -98,6 +98,16 @@ jobs:
         with:
           path: artifacts
 
+      # Pinned. The board check imports this from our own origin, so the page
+      # does not depend on a CDN being reachable to tell someone what they are
+      # about to overwrite.
+      - name: Fetch esptool-js
+        run: |
+          set -euo pipefail
+          npm pack esptool-js@0.7.0 --silent >/dev/null
+          tar xzf esptool-js-0.7.0.tgz
+          test -s package/bundle.js
+
       - name: Assemble the flasher
         run: |
           set -euo pipefail
@@ -105,6 +115,7 @@ jobs:
           echo "firmware $version"
           python3 tools/make_manifest.py --artifacts artifacts --out site \
             --version "$version" --commit "$GITHUB_SHA" \
+            --esptool package/bundle.js \
             --summary "$GITHUB_STEP_SUMMARY"
           ls -la site
 
