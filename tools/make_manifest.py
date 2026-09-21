@@ -38,6 +38,8 @@ def main() -> int:
     ap.add_argument("--version", required=True)
     ap.add_argument("--commit", default="")
     ap.add_argument("--page", default="web/index.html")
+    ap.add_argument("--summary", default="",
+                    help="also write a markdown table here (GITHUB_STEP_SUMMARY)")
     args = ap.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
@@ -101,6 +103,32 @@ def main() -> int:
         if not os.path.isfile(path) or os.path.getsize(path) == 0:
             print("site/%s missing or empty" % name, file=sys.stderr)
             return 1
+
+    # The app partition from default_8MB.csv. Worth stating as a percentage:
+    # a build creeping towards the partition size is the kind of thing nobody
+    # notices until an image silently stops fitting.
+    APP_PARTITION = 0x330000
+
+    table = ["| profile | image | application | of %.2f MB app partition |"
+             % (APP_PARTITION / 1048576.0),
+             "|---|---|---|---|"]
+    for b in builds:
+        table.append("| %s | %.0f kB | %.0f kB | %.1f%% |" % (
+            b["profile"].upper(), b["bytes"] / 1024.0,
+            b["app_bytes"] / 1024.0, b["app_bytes"] * 100.0 / APP_PARTITION))
+    table.append("")
+    table.append("firmware %s from %s" % (args.version, (args.commit or "?")[:7]))
+
+    over = [b for b in builds if b["app_bytes"] > APP_PARTITION]
+    if over:
+        print("application does not fit the app partition: %s"
+              % ", ".join(b["profile"] for b in over), file=sys.stderr)
+        return 1
+
+    print("\n".join(table))
+    if args.summary:
+        with open(args.summary, "a") as f:
+            f.write("### Flasher published\n\n" + "\n".join(table) + "\n")
 
     print("flasher assembled in %s/" % args.out)
     return 0
