@@ -1,0 +1,135 @@
+# Build the firmware for the real target, and publish a browser flasher.
+#
+# Until this existed, nothing in this repository had ever compiled cypher32.ino
+# for an ESP32. The host test suite compiles the sketch against stubs, which
+# catches a great deal, but it cannot catch anything that depends on the real
+# toolchain, the real Arduino core, or the real libraries. This job does.
+#
+# It also produces what the flasher needs: one merged image per range profile,
+# with the offsets taken from PlatformIO rather than guessed.
+name: firmware
+
+on:
+  push:
+    branches: [main, "claude/**"]
+    paths-ignore: ["**/*.md", "docs/img/**"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: firmware-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  host-tests:
+    # Cheap and fast, and it fails for different reasons than the firmware
+    # build does, so it is worth knowing which of the two broke.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install test tooling
+        run: |
+          python3 -m pip install --quiet pillow
+          npm install --no-save --silent playwright
+          npx --yes playwright install --with-deps chromium
+      - name: Lint, unit tests, every range profile
+        working-directory: test
+        run: make lint && make run && make profiles
+      - name: Flasher page
+        working-directory: test
+        run: NODE_PATH="$GITHUB_WORKSPACE/node_modules" node test_flasher.js
+
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [fast, long, epic]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # The toolchain and the Arduino core are hundreds of megabytes and do not
+      # change between runs; without this every build re-downloads them.
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            ~/.cache/pip
+          key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
+          restore-keys: pio-${{ runner.os }}-
+
+      - name: Install PlatformIO
+        run: python3 -m pip install --quiet platformio
+
+      - name: Build ${{ matrix.profile }}
+        run: pio run -e ${{ matrix.profile }}
+
+      - name: Report flash and RAM use
+        run: |
+          echo "### ${{ matrix.profile }}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat ".pio/build/${{ matrix.profile }}/parts-${{ matrix.profile }}.json" \
+            >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cypher32-${{ matrix.profile }}
+          path: |
+            .pio/build/${{ matrix.profile }}/cypher32-${{ matrix.profile }}.bin
+            .pio/build/${{ matrix.profile }}/parts-${{ matrix.profile }}.json
+          if-no-files-found: error
+
+  site:
+    needs: [build, host-tests]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Assemble the flasher
+        run: |
+          set -euo pipefail
+          version=$(grep -oP 'FIRMWARE_VERSION\s+"\K[^"]+' cypher32_packets.h)
+          echo "firmware $version"
+          python3 tools/make_manifest.py --artifacts artifacts --out site \
+            --version "$version" --commit "$GITHUB_SHA"
+          ls -la site
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flasher-site
+          path: site
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    # Separate from the build on purpose. Publishing needs Pages switched on
+    # for the repository with its source set to GitHub Actions; until someone
+    # does that this job fails and the firmware build above still succeeds,
+    # with the flasher downloadable as an ordinary artifact.
+    needs: site
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

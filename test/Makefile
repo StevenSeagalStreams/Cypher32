@@ -16,7 +16,7 @@ CXXFLAGS := -std=c++17 -I stub -Wall -Wno-format
 BINS     := test_link test_twonode test_mesh test_pages
 
 .PHONY: all run asan portal lint qr sketch shots clean
-all: lint sketch run profiles portal qr
+all: lint sketch run profiles portal flasher qr
 
 run: $(BINS)
 	@for b in $(BINS); do echo "── $$b ──"; ./$$b || exit 1; echo; done
@@ -59,6 +59,13 @@ shots: render_eink
 	@python3 pbm2png.py out ../docs/img
 	@python3 portal/extract.py >/dev/null
 	@NODE_PATH=$${NODE_PATH:-/opt/node22/lib/node_modules} node shoot_portal.js ../docs/img
+
+.PHONY: flasher
+# The browser flasher page, driven in a real browser. Its failure modes are
+# all invisible to someone reading the HTML.
+flasher:
+	@echo "── flasher ──"
+	@NODE_PATH=$${NODE_PATH:-/opt/node22/lib/node_modules} node test_flasher.js
 
 .PHONY: profiles
 # Every range profile must build and pass. The link-layer timeouts are derived

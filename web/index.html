@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Flash Cypher32</title>
+<meta name="description" content="Install Cypher32 onto a Heltec Wireless Paper straight from your browser.">
+<style>
+  :root { color-scheme: dark; }
+  *{box-sizing:border-box}
+  body{margin:0;background:#05080a;color:#c8f5c8;
+       font:14px/1.5 ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+       padding:24px 16px calc(40px + env(safe-area-inset-bottom));}
+  .wrap{max-width:660px;margin:0 auto}
+  h1{font-size:26px;color:#7dffa8;margin:0 0 4px;letter-spacing:.02em}
+  h2{font-size:12px;letter-spacing:1.4px;color:#6fbf8a;text-transform:uppercase;
+     margin:0 0 10px;font-weight:600}
+  p{margin:0 0 10px}
+  a{color:#5fe08a}
+  .mut{color:#7a927f}
+  .xs{font-size:12px}
+  .card{background:#0b1114;border:1px solid #1d2f26;border-radius:10px;
+        padding:16px;margin-bottom:14px}
+  .lede{color:#9fd8b4;margin-bottom:18px}
+  table{width:100%;border-collapse:collapse;font-size:12px;margin:2px 0 0}
+  th,td{text-align:left;padding:5px 8px 5px 0;border-bottom:1px solid #16241c;
+        vertical-align:top}
+  th{color:#6fbf8a;font-weight:600;white-space:nowrap}
+  td.n{color:#9fd8b4;white-space:nowrap}
+  label.prof{display:block;border:1px solid #1d2f26;border-radius:8px;
+             padding:11px 13px;margin-bottom:8px;cursor:pointer;background:#070d0f}
+  label.prof:has(input:checked){border-color:#3f8f63;background:#0d1a12}
+  label.prof input{margin-right:9px;accent-color:#5fe08a}
+  label.prof b{color:#8dffb4}
+  .pdesc{margin:5px 0 0 25px;color:#7a927f;font-size:12px}
+  esp-web-install-button{--esp-tools-button-color:#8dffb4;
+    --esp-tools-button-text-color:#8dffb4;display:block}
+  /* Until the custom element upgrades, the browser renders every slotted
+     child at once — so an ad blocker or a corporate proxy that stops the CDN
+     produces a page showing the install button AND the "needs HTTPS" warning
+     together. Hide the conditional slots until something owns them. */
+  esp-web-install-button:not(:defined) > [slot="unsupported"],
+  esp-web-install-button:not(:defined) > [slot="not-allowed"]{display:none}
+  .fallback{border:1px solid #8a3030;border-radius:8px;padding:13px;
+            background:#160a0a;color:#ffb0b0}
+  .fallback b{color:#ff8080}
+  ol{margin:6px 0 0 18px;padding:0}
+  li{margin-bottom:5px}
+  code{background:#0d1a12;padding:1px 5px;border-radius:4px;color:#8dffb4}
+  .warn{border-left:3px solid #8a6a30;padding-left:11px;color:#d8c49f;margin:10px 0}
+  footer{margin-top:22px;text-align:center}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>Cypher32</h1>
+  <p class="lede">Install the firmware onto a Heltec Wireless Paper straight
+  from this page. No toolchain, no command line — plug the board in over USB
+  and press the button.</p>
+
+  <!-- Shown only when Web Serial is missing. The button below renders its own
+       "not supported" state, but it is small and easy to miss, and the single
+       most common reason someone lands here and fails is simply the browser. -->
+  <div class="card fallback" id="nosupport" hidden>
+    <p><b>This browser cannot flash devices.</b></p>
+    <p class="xs">Flashing needs the Web Serial API, which today means
+    <b>Chrome, Edge or Opera on a desktop computer</b>. Firefox and Safari do
+    not implement it, and neither do phone or tablet browsers — including
+    Chrome on Android and iOS.</p>
+    <p class="xs mut">Open this page on a laptop or desktop in Chrome or Edge,
+    or flash from the command line with PlatformIO — see the
+    <a href="https://github.com/StevenSeagalStreams/Cypher32#building-and-testing">README</a>.</p>
+  </div>
+
+  <div class="card">
+    <h2>1 &middot; Choose your range</h2>
+    <p class="xs mut" style="margin-bottom:12px">Every device in one game must
+    run the <b>same profile</b>. A different spreading factor or frequency is
+    not a weak link — the radios simply cannot hear each other.</p>
+
+    <label class="prof">
+      <input type="radio" name="profile" value="fast"><b>FAST</b>
+      <span class="mut xs">&mdash; SF7, 868.1&nbsp;MHz, 14&nbsp;dBm</span>
+      <div class="pdesc">Shortest range, quickest to respond. Best for a room
+      or a table with a lot of people around it.</div>
+    </label>
+
+    <label class="prof">
+      <input type="radio" name="profile" value="long" checked><b>LONG</b>
+      <span class="mut xs">&mdash; SF9, 869.525&nbsp;MHz, 22&nbsp;dBm
+      &nbsp;·&nbsp; recommended</span>
+      <div class="pdesc">About three times the range of FAST, and still
+      comfortable with twenty devices in play.</div>
+    </label>
+
+    <label class="prof">
+      <input type="radio" name="profile" value="epic"><b>EPIC</b>
+      <span class="mut xs">&mdash; SF11, 869.525&nbsp;MHz, 22&nbsp;dBm</span>
+      <div class="pdesc">Roughly 4.6&times; the range, but it spends far more
+      airtime to get it. For a handful of people spread across a city, not for
+      a crowded room.</div>
+    </label>
+
+    <div class="warn xs">
+      <b>869.525&nbsp;MHz and 22&nbsp;dBm are legal in the EU</b> (the ETSI g3
+      sub-band). If you are elsewhere, check your local rules before using LONG
+      or EPIC — and build FAST from source on a frequency your region allows.
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>2 &middot; Connect and install</h2>
+    <p class="xs mut" style="margin-bottom:6px">Make sure the antenna is
+    attached <b>before</b> you power the board — transmitting into an empty
+    connector can damage the radio.</p>
+    <esp-web-install-button id="installer" manifest="manifest-long.json">
+      <button slot="activate" style="width:100%;min-height:46px;padding:12px;
+        background:#123020;color:#8dffb4;border:1px solid #2c6b45;
+        border-radius:9px;font:inherit;font-weight:600;letter-spacing:.06em;
+        cursor:pointer">INSTALL CYPHER32</button>
+      <span slot="unsupported" class="xs" style="color:#ffb0b0">
+        This browser cannot flash devices &mdash; see above.</span>
+      <span slot="not-allowed" class="xs" style="color:#ffb0b0">
+        This page must be served over HTTPS to flash a device.</span>
+    </esp-web-install-button>
+    <p class="xs" id="cdnfail" hidden
+       style="margin-top:11px;color:#ffb0b0">The installer script could not be
+      loaded from the network. An ad blocker, a corporate proxy or an offline
+      machine will all do this. Reload with the blocker off, or download the
+      <code>.bin</code> from the
+      <a href="https://github.com/StevenSeagalStreams/Cypher32/actions">build
+      artifacts</a> and flash it with esptool.</p>
+    <p class="xs mut" style="margin-top:11px">Your browser will ask which
+    serial port to use. The Heltec board appears as a <code>CP210x</code> or
+    <code>USB Serial</code> device. If nothing is listed, install the
+    <a href="https://www.silabs.com/developer-tools/usb-to-uart-bridge-vcp-drivers">CP210x
+    driver</a> and reconnect.</p>
+  </div>
+
+  <div class="card">
+    <h2>3 &middot; First boot</h2>
+    <ol class="xs">
+      <li>The screen shows a QR code and a Wi-Fi name like
+          <code>C32_XXXX</code>.</li>
+      <li>Scan it, or join that open network by hand.</li>
+      <li>Your phone opens the portal automatically. If it does not, visit
+          <code>192.168.4.1</code>.</li>
+      <li>Pick a faction and a password. That device is now yours.</li>
+    </ol>
+  </div>
+
+  <div class="card">
+    <h2>What gets written</h2>
+    <p class="xs mut">Flashing replaces everything on the board, including any
+    saved game on it. Each image is the full layout — bootloader, partition
+    table and application — so there is nothing else to install.</p>
+    <table id="buildinfo"><tbody><tr><td class="mut xs">loading…</td></tr></tbody></table>
+    <p class="xs mut" style="margin-top:10px">Every build here is compiled by
+    GitHub Actions from the commit it names, and the shared radio key is the
+    public default — anyone who flashes from this page can hear anyone else who
+    did. For a private game, change <code>LORA_KEY</code> and build it
+    yourself.</p>
+  </div>
+
+  <footer class="xs mut">
+    <a href="https://github.com/StevenSeagalStreams/Cypher32">Source and
+    documentation on GitHub</a>
+  </footer>
+</div>
+
+<script type="module"
+  src="https://unpkg.com/esp-web-tools@10.0.0/dist/web/install-button.js?module"></script>
+<script>
+  // Web Serial is the whole dependency. Say so up front rather than letting
+  // someone read three sections and then find the button inert.
+  if (!("serial" in navigator)) document.getElementById("nosupport").hidden = false;
+
+  // The button comes from a CDN. If it never arrives the page would otherwise
+  // just sit there looking fine with an inert button on it.
+  window.setTimeout(function () {
+    if (!customElements.get("esp-web-install-button"))
+      document.getElementById("cdnfail").hidden = false;
+  }, 8000);
+
+  var installer = document.getElementById("installer");
+  document.querySelectorAll('input[name=profile]').forEach(function (r) {
+    r.addEventListener("change", function () {
+      if (!r.checked) return;
+      // setAttribute, not .manifest. The custom element is loaded as a module
+      // from a CDN and may not have upgraded yet when someone clicks; a plain
+      // JS property set on a not-yet-upgraded element is just a property, and
+      // the button would go on offering whichever profile the HTML shipped
+      // with. The attribute is what it reads either way.
+      installer.setAttribute("manifest", "manifest-" + r.value + ".json");
+    });
+  });
+
+  // build-info.json is written by CI beside the binaries, so the page always
+  // describes the images actually sitting next to it rather than whatever was
+  // true when this HTML was last edited.
+  fetch("build-info.json", { cache: "no-store" })
+    .then(function (r) { return r.ok ? r.json() : null; })
+    .then(function (info) {
+      var body = document.querySelector("#buildinfo tbody");
+      if (!info) { body.innerHTML =
+        '<tr><td class="mut xs">No build information published yet.</td></tr>';
+        return; }
+      var rows = '<tr><th>Profile</th><th>Size</th><th>Version</th></tr>';
+      (info.builds || []).forEach(function (b) {
+        rows += '<tr><td class="n">' + b.profile.toUpperCase() + '</td>' +
+                '<td class="n">' + (b.bytes / 1024).toFixed(0) + ' kB</td>' +
+                '<td class="n">' + (info.version || '?') + '</td></tr>';
+      });
+      body.innerHTML = rows;
+      var f = document.createElement("p");
+      f.className = "xs mut";
+      f.style.marginTop = "8px";
+      f.textContent = "Built " + (info.built || "?") + " from commit " +
+                      String(info.commit || "?").slice(0, 7) + ".";
+      document.querySelector("#buildinfo").after(f);
+    })
+    .catch(function () {});
+</script>
+</body>
+</html>
